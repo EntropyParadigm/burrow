@@ -16,14 +16,21 @@ defmodule Burrow.Server.PublicHandler do
     tunnel_id = opts[:tunnel_id]
     port = opts[:port] || 0
 
+    Logger.debug("[PublicHandler] Connection on port #{port}, tunnel_id=#{inspect(tunnel_id)}, client_id=#{inspect(client_id)}")
+
     # Ensure we have a map for state
     base_state = if is_map(state), do: state, else: %{}
 
     # Get the control handler for this client
-    case Burrow.Server.get_client_for_tunnel(port) do
+    result = Burrow.Server.get_client_for_tunnel(port)
+    Logger.debug("[PublicHandler] get_client_for_tunnel(#{port}) = #{inspect(result)}")
+
+    case result do
       {:ok, control_pid, ^tunnel_id} ->
         # Generate connection ID
         connection_id = :erlang.unique_integer([:positive])
+
+        Logger.debug("[PublicHandler] Notifying control handler of new connection #{connection_id}")
 
         # Notify control handler of new connection
         send(control_pid, {:new_connection, tunnel_id, connection_id, self()})
@@ -36,13 +43,19 @@ defmodule Burrow.Server.PublicHandler do
           port: port
         })}
 
-      _ ->
+      {:ok, _control_pid, other_tunnel_id} ->
+        Logger.warning("[PublicHandler] Tunnel ID mismatch: expected #{inspect(tunnel_id)}, got #{inspect(other_tunnel_id)}")
+        {:close, :tunnel_mismatch}
+
+      other ->
+        Logger.warning("[PublicHandler] No client for port #{port}: #{inspect(other)}")
         {:close, :no_client}
     end
   end
 
   @impl ThousandIsland.Handler
   def handle_data(data, _socket, state) do
+    Logger.debug("[PublicHandler] Forwarding #{byte_size(data)} bytes to control handler")
     # Forward to control handler
     send(state.control_pid, {:tunnel_data, state.tunnel_id, state.connection_id, data})
     {:continue, state}
