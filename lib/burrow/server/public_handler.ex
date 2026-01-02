@@ -67,8 +67,10 @@ defmodule Burrow.Server.PublicHandler do
   def handle_data(data, _socket, state) do
     Logger.info("[PublicHandler] Forwarding #{byte_size(data)} bytes to control handler")
     log_to_file("[PublicHandler] DATA: #{byte_size(data)} bytes, tunnel=#{state.tunnel_id}, conn=#{state.connection_id}")
+    log_to_file("[PublicHandler] Sending to control_pid=#{inspect(state.control_pid)}, alive=#{Process.alive?(state.control_pid)}")
     # Forward to control handler
     send(state.control_pid, {:tunnel_data, state.tunnel_id, state.connection_id, data})
+    log_to_file("[PublicHandler] Sent tunnel_data message")
     {:continue, state}
   end
 
