@@ -13,6 +13,9 @@ defmodule Burrow.Server.ControlHandler do
     # Get client IP for filtering and rate limiting
     client_ip = get_client_ip(socket)
 
+    # Ensure state is a map (handler_options might be a list or empty)
+    base_state = if is_map(state), do: state, else: %{}
+
     # Check IP allowlist/blocklist first
     unless Burrow.IPFilter.allowed?(client_ip) do
       Logger.warning("[ControlHandler] Connection rejected (IP filtered): #{client_ip}")
@@ -22,7 +25,7 @@ defmodule Burrow.Server.ControlHandler do
       case Burrow.RateLimiter.check_connection(client_ip) do
         :ok ->
           Burrow.RateLimiter.record_connection(client_ip)
-          {:continue, Map.merge(state, %{
+          {:continue, Map.merge(base_state, %{
             socket: socket,
             buffer: <<>>,
             authenticated: false,
