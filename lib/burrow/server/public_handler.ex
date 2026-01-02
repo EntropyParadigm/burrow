@@ -50,7 +50,7 @@ defmodule Burrow.Server.PublicHandler do
 
   @impl ThousandIsland.Handler
   def handle_close(_socket, state) do
-    if Map.has_key?(state, :control_pid) do
+    if is_map(state) and Map.has_key?(state, :control_pid) do
       send(state.control_pid, {:tunnel_closed, state.tunnel_id, state.connection_id})
     end
     :ok
@@ -58,7 +58,7 @@ defmodule Burrow.Server.PublicHandler do
 
   @impl ThousandIsland.Handler
   def handle_shutdown(_socket, state) do
-    if Map.has_key?(state, :control_pid) do
+    if is_map(state) and Map.has_key?(state, :control_pid) do
       send(state.control_pid, {:tunnel_closed, state.tunnel_id, state.connection_id})
     end
     :ok
