@@ -62,7 +62,7 @@ defmodule Burrow.Protocol do
   Returns `{:ok, type, payload, rest}` or `{:incomplete, data}` or `{:error, reason}`.
   """
   @spec decode(binary()) :: {:ok, atom(), map(), binary()} | {:incomplete, binary()} | {:error, term()}
-  def decode(<<length::32, type::8, rest::binary>> = data) when byte_size(rest) >= length - 1 do
+  def decode(<<length::32, type::8, rest::binary>> = _data) when byte_size(rest) >= length - 1 do
     payload_length = length - 1
     <<payload::binary-size(payload_length), remaining::binary>> = rest
 

@@ -21,8 +21,9 @@ defmodule Burrow.Server do
   use GenServer
   require Logger
 
-  alias Burrow.Protocol
-  alias Burrow.Server.{ControlHandler, PublicListener}
+  # Aliases used via module references in start_link calls
+  # alias Burrow.Protocol
+  # alias Burrow.Server.{ControlHandler, PublicListener}
 
   defstruct [
     :port,

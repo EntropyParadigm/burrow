@@ -45,7 +45,7 @@ defmodule Burrow.Server.ControlHandler do
   end
 
   # Handle messages from public listeners
-  @impl ThousandIsland.Handler
+  # Note: handle_info/3 is supported by ThousandIsland.Handler but not part of the behaviour spec
   def handle_info({:tunnel_data, tunnel_id, connection_id, data}, socket, state) do
     frame = Protocol.encode_data(tunnel_id, connection_id, data)
     ThousandIsland.Socket.send(socket, frame)

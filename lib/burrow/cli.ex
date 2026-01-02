@@ -46,31 +46,36 @@ defmodule Burrow.CLI do
     {commands, opts}
   end
 
-  defp run({["help" | _], _opts}) do
+  defp run({commands, opts}) do
+    # Check for help flag first
+    if Keyword.get(opts, :help, false) do
+      print_help()
+    else
+      run_command(commands, opts)
+    end
+  end
+
+  defp run_command(["help" | _], _opts) do
     print_help()
   end
 
-  defp run({_, opts}) when opts[:help] do
-    print_help()
-  end
-
-  defp run({["server" | _], opts}) do
+  defp run_command(["server" | _], opts) do
     run_server(opts)
   end
 
-  defp run({["client" | _], opts}) do
+  defp run_command(["client" | _], opts) do
     run_client(opts)
   end
 
-  defp run({["version" | _], _opts}) do
+  defp run_command(["version" | _], _opts) do
     IO.puts("Burrow v#{Burrow.version()}")
   end
 
-  defp run({[], _opts}) do
+  defp run_command([], _opts) do
     print_help()
   end
 
-  defp run({[cmd | _], _opts}) do
+  defp run_command([cmd | _], _opts) do
     IO.puts("Unknown command: #{cmd}")
     IO.puts("Run 'burrow --help' for usage.")
     System.halt(1)
