@@ -21,8 +21,10 @@ defmodule Burrow.Client do
   - `:token` - Authentication token (required)
   - `:tunnels` - List of tunnel configurations (required)
   - `:reconnect` - Auto-reconnect on disconnect (default: `true`)
-  - `:reconnect_interval` - Ms between reconnect attempts (default: `5000`)
+  - `:reconnect_interval` - Base ms between reconnect attempts (default: `5000`)
+  - `:max_reconnect_interval` - Max ms for exponential backoff (default: `60000`)
   - `:heartbeat_interval` - Ms between keepalive pings (default: `30000`)
+  - `:heartbeat_timeout` - Ms before considering connection dead (default: `90000`)
   """
 
   use GenServer
@@ -31,7 +33,9 @@ defmodule Burrow.Client do
   alias Burrow.Protocol
 
   @default_reconnect_interval 5_000
+  @default_max_reconnect_interval 60_000
   @default_heartbeat_interval 30_000
+  @default_heartbeat_timeout 90_000
 
   defstruct [
     :host,
@@ -43,8 +47,13 @@ defmodule Burrow.Client do
     :client_id,
     :reconnect,
     :reconnect_interval,
+    :max_reconnect_interval,
+    :current_reconnect_interval,
     :heartbeat_interval,
+    :heartbeat_timeout,
     :heartbeat_ref,
+    :heartbeat_timeout_ref,
+    :last_pong_at,
     :buffer,
     :connected_at,
     :next_tunnel_id,
@@ -99,7 +108,9 @@ defmodule Burrow.Client do
     tunnel_configs = Keyword.fetch!(opts, :tunnels)
     reconnect = Keyword.get(opts, :reconnect, true)
     reconnect_interval = Keyword.get(opts, :reconnect_interval, @default_reconnect_interval)
+    max_reconnect_interval = Keyword.get(opts, :max_reconnect_interval, @default_max_reconnect_interval)
     heartbeat_interval = Keyword.get(opts, :heartbeat_interval, @default_heartbeat_interval)
+    heartbeat_timeout = Keyword.get(opts, :heartbeat_timeout, @default_heartbeat_timeout)
 
     # TLS configuration
     tls = Keyword.get(opts, :tls, false)
@@ -115,8 +126,13 @@ defmodule Burrow.Client do
       client_id: nil,
       reconnect: reconnect,
       reconnect_interval: reconnect_interval,
+      max_reconnect_interval: max_reconnect_interval,
+      current_reconnect_interval: reconnect_interval,
       heartbeat_interval: heartbeat_interval,
+      heartbeat_timeout: heartbeat_timeout,
       heartbeat_ref: nil,
+      heartbeat_timeout_ref: nil,
+      last_pong_at: nil,
       buffer: <<>>,
       connected_at: nil,
       next_tunnel_id: 1,
@@ -196,16 +212,21 @@ defmodule Burrow.Client do
   def handle_info(:connect, state) do
     case do_connect(state) do
       {:ok, new_state} ->
-        {:noreply, new_state}
+        # Reset reconnect interval on successful connection
+        {:noreply, %{new_state | current_reconnect_interval: state.reconnect_interval}}
 
       {:error, reason} ->
         Logger.warning("[Burrow.Client] Connection failed: #{inspect(reason)}")
 
         if state.reconnect do
-          Process.send_after(self(), :connect, state.reconnect_interval)
+          # Exponential backoff with jitter
+          next_interval = calculate_backoff(state.current_reconnect_interval, state.max_reconnect_interval)
+          Logger.debug("[Burrow.Client] Reconnecting in #{next_interval}ms...")
+          Process.send_after(self(), :connect, next_interval)
+          {:noreply, %{state | current_reconnect_interval: next_interval}}
+        else
+          {:noreply, state}
         end
-
-        {:noreply, state}
     end
   end
 
@@ -214,10 +235,36 @@ defmodule Burrow.Client do
     if state.socket do
       frame = Protocol.encode_ping()
       send_data(state.transport, state.socket, frame)
-    end
 
-    ref = Process.send_after(self(), :heartbeat, state.heartbeat_interval)
-    {:noreply, %{state | heartbeat_ref: ref}}
+      # Schedule heartbeat timeout check
+      timeout_ref = Process.send_after(self(), :heartbeat_timeout_check, state.heartbeat_timeout)
+      ref = Process.send_after(self(), :heartbeat, state.heartbeat_interval)
+      {:noreply, %{state | heartbeat_ref: ref, heartbeat_timeout_ref: timeout_ref}}
+    else
+      ref = Process.send_after(self(), :heartbeat, state.heartbeat_interval)
+      {:noreply, %{state | heartbeat_ref: ref}}
+    end
+  end
+
+  @impl true
+  def handle_info(:heartbeat_timeout_check, state) do
+    now = System.monotonic_time(:millisecond)
+    last_activity = state.last_pong_at || 0
+
+    if state.socket && (now - last_activity) > state.heartbeat_timeout do
+      Logger.warning("[Burrow.Client] Connection timeout - no pong received in #{state.heartbeat_timeout}ms")
+      state = do_disconnect(state, :heartbeat_timeout)
+
+      if state.reconnect do
+        next_interval = calculate_backoff(state.current_reconnect_interval, state.max_reconnect_interval)
+        Process.send_after(self(), :connect, next_interval)
+        {:noreply, %{state | current_reconnect_interval: next_interval}}
+      else
+        {:noreply, state}
+      end
+    else
+      {:noreply, state}
+    end
   end
 
   # Handle TCP data
@@ -369,6 +416,10 @@ defmodule Burrow.Client do
       Process.cancel_timer(state.heartbeat_ref)
     end
 
+    if state.heartbeat_timeout_ref do
+      Process.cancel_timer(state.heartbeat_timeout_ref)
+    end
+
     # Close all local connections
     Enum.each(state.local_connections, fn {_key, socket} ->
       :gen_tcp.close(socket)
@@ -379,6 +430,8 @@ defmodule Burrow.Client do
     %{state |
       socket: nil,
       heartbeat_ref: nil,
+      heartbeat_timeout_ref: nil,
+      last_pong_at: nil,
       tunnels: %{},
       local_connections: %{},
       connected_at: nil,
@@ -488,9 +541,16 @@ defmodule Burrow.Client do
   end
 
   defp handle_frame(state, :pong, %{timestamp: ts}) do
-    latency = System.monotonic_time(:millisecond) - ts
+    now = System.monotonic_time(:millisecond)
+    latency = now - ts
     Logger.debug("[Burrow.Client] Pong received, latency: #{latency}ms")
-    state
+
+    # Cancel pending timeout check if any
+    if state.heartbeat_timeout_ref do
+      Process.cancel_timer(state.heartbeat_timeout_ref)
+    end
+
+    %{state | last_pong_at: now, heartbeat_timeout_ref: nil}
   end
 
   defp handle_frame(state, :ping, %{timestamp: ts}) do
@@ -583,5 +643,14 @@ defmodule Burrow.Client do
       _ ->
         Keyword.merge(base_opts, tls_opts)
     end
+  end
+
+  # Calculate exponential backoff with jitter
+  defp calculate_backoff(current_interval, max_interval) do
+    # Double the interval, but cap at max
+    doubled = min(current_interval * 2, max_interval)
+    # Add 0-25% jitter to prevent thundering herd
+    jitter = :rand.uniform(div(doubled, 4))
+    doubled + jitter
   end
 end

@@ -138,17 +138,24 @@ Burrow.connect("server:4000",
 Multiple logical connections over a single TCP connection using stream IDs.
 
 ### Heartbeat Tuning
-**Status:** 📋 Planned
+**Status:** ✅ Completed
 
-Configurable heartbeat intervals and dead peer detection.
+Configurable heartbeat intervals, dead peer detection, and exponential backoff reconnection.
 
 ```elixir
 Burrow.connect("server:4000",
   token: "secret",
-  heartbeat_interval: 15_000,    # 15 seconds
-  heartbeat_timeout: 45_000,     # 45 seconds before disconnect
+  heartbeat_interval: 15_000,       # 15 seconds between pings
+  heartbeat_timeout: 45_000,        # 45 seconds before disconnect
+  reconnect_interval: 5_000,        # Base reconnect interval
+  max_reconnect_interval: 60_000,   # Max backoff interval
   tunnels: [...]
 )
+
+# Features:
+# - Automatic dead peer detection via heartbeat timeout
+# - Exponential backoff with jitter for reconnection
+# - Configurable intervals for all timing parameters
 ```
 
 ### Graceful Shutdown
