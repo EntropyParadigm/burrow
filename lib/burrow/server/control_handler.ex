@@ -69,14 +69,14 @@ defmodule Burrow.Server.ControlHandler do
   end
 
   # Handle messages from public listeners
-  # Note: handle_info/3 is supported by ThousandIsland.Handler but not part of the behaviour spec
-  def handle_info({:tunnel_data, tunnel_id, connection_id, data}, socket, state) do
+  # ThousandIsland handle_info/2 receives {socket, state} tuple as second arg
+  def handle_info({:tunnel_data, tunnel_id, connection_id, data}, {socket, state}) do
     frame = Protocol.encode_data(tunnel_id, connection_id, data)
     ThousandIsland.Socket.send(socket, frame)
     {:continue, state}
   end
 
-  def handle_info({:tunnel_closed, tunnel_id, connection_id}, socket, state) do
+  def handle_info({:tunnel_closed, tunnel_id, connection_id}, {socket, state}) do
     frame = Protocol.encode_close(tunnel_id, connection_id)
     ThousandIsland.Socket.send(socket, frame)
 
@@ -84,12 +84,12 @@ defmodule Burrow.Server.ControlHandler do
     {:continue, %{state | remote_connections: new_connections}}
   end
 
-  def handle_info({:new_connection, tunnel_id, connection_id, handler_pid}, _socket, state) do
+  def handle_info({:new_connection, tunnel_id, connection_id, handler_pid}, {_socket, state}) do
     new_connections = Map.put(state.remote_connections, {tunnel_id, connection_id}, handler_pid)
     {:continue, %{state | remote_connections: new_connections}}
   end
 
-  def handle_info(_msg, _socket, state) do
+  def handle_info(_msg, {_socket, state}) do
     {:continue, state}
   end
 

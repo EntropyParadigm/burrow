@@ -65,17 +65,17 @@ defmodule Burrow.Server.PublicHandler do
   end
 
   # Handle data from client (via control handler)
-  # Note: handle_info/3 is supported by ThousandIsland.Handler but not part of the behaviour spec
-  def handle_info({:client_data, data}, socket, state) do
+  # ThousandIsland handle_info/2 receives {socket, state} tuple as second arg
+  def handle_info({:client_data, data}, {socket, state}) do
     ThousandIsland.Socket.send(socket, data)
     {:continue, state}
   end
 
-  def handle_info(:close, _socket, _state) do
+  def handle_info(:close, {_socket, _state}) do
     {:close, :client_closed}
   end
 
-  def handle_info(_msg, _socket, state) do
+  def handle_info(_msg, {_socket, state}) do
     {:continue, state}
   end
 
