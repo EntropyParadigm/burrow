@@ -472,7 +472,7 @@ defmodule Burrow.Server do
     case ThousandIsland.start_link(
       port: port,
       handler_module: Burrow.Server.PublicHandler,
-      handler_options: [client_id: client_id, tunnel_id: tunnel_id]
+      handler_options: [client_id: client_id, tunnel_id: tunnel_id, port: port]
     ) do
       {:ok, pid} ->
         {:ok, pid, port}
