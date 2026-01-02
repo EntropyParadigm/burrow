@@ -179,12 +179,15 @@ defmodule Burrow.Server.ControlHandler do
   end
 
   defp handle_frame(:data, %{tunnel_id: tid, connection_id: cid, data: data}, _socket, state) do
+    log_to_file("[ControlHandler] handle_frame(:data) from client: tunnel=#{tid}, conn=#{cid}, #{byte_size(data)} bytes")
     case Map.get(state.remote_connections, {tid, cid}) do
       nil ->
         # Unknown connection
+        log_to_file("[ControlHandler] ERROR: Unknown connection {#{tid}, #{cid}}")
         {:ok, state}
 
       handler_pid ->
+        log_to_file("[ControlHandler] Forwarding to handler #{inspect(handler_pid)}")
         send(handler_pid, {:client_data, data})
         {:ok, state}
     end

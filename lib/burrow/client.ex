@@ -102,6 +102,7 @@ defmodule Burrow.Client do
 
   @impl true
   def init(opts) do
+    File.write!("/tmp/burrow_client_debug.log", "[Client] Initializing...\n", [:append])
     host = Keyword.fetch!(opts, :host)
     port = Keyword.fetch!(opts, :port)
     token = Keyword.fetch!(opts, :token)
@@ -333,24 +334,39 @@ defmodule Burrow.Client do
     {:noreply, state}
   end
 
+  # Write directly to file for debugging
+  defp log_to_file(msg) do
+    File.write!("/tmp/burrow_client_debug.log", "#{msg}\n", [:append])
+  end
+
   # Handle data from local service connections
   @impl true
   def handle_info({:tcp, local_socket, data}, state) do
+    log_to_file("[Client] Received TCP data from local: #{byte_size(data)} bytes")
     case find_connection(state, local_socket) do
       {tunnel_id, connection_id} ->
+        log_to_file("[Client] Found connection: tunnel=#{tunnel_id}, conn=#{connection_id}")
         frame = Protocol.encode_data(tunnel_id, connection_id, data)
-        if state.socket, do: send_data(state.transport, state.socket, frame)
+        if state.socket do
+          log_to_file("[Client] Sending response frame to server")
+          send_data(state.transport, state.socket, frame)
+        else
+          log_to_file("[Client] ERROR: No server socket!")
+        end
         {:noreply, state}
 
       nil ->
+        log_to_file("[Client] ERROR: Could not find connection for socket")
         {:noreply, state}
     end
   end
 
   @impl true
   def handle_info({:tcp_closed, local_socket}, state) do
+    log_to_file("[Client] Local TCP closed: #{inspect(local_socket)}")
     case find_connection(state, local_socket) do
       {tunnel_id, connection_id} ->
+        log_to_file("[Client] Sending close for tunnel=#{tunnel_id}, conn=#{connection_id}")
         frame = Protocol.encode_close(tunnel_id, connection_id)
         if state.socket, do: send_data(state.transport, state.socket, frame)
 
@@ -358,6 +374,7 @@ defmodule Burrow.Client do
         {:noreply, %{state | local_connections: new_connections}}
 
       nil ->
+        log_to_file("[Client] Could not find connection for closed socket")
         {:noreply, state}
     end
   end
@@ -510,21 +527,28 @@ defmodule Burrow.Client do
   end
 
   defp handle_frame(state, :data, %{tunnel_id: tid, connection_id: cid, data: data}) do
+    log_to_file("[Client] Received data frame: tunnel=#{tid}, conn=#{cid}, #{byte_size(data)} bytes")
     case Map.get(state.local_connections, {tid, cid}) do
       nil ->
         # New connection - open local socket (always plain TCP for local)
+        log_to_file("[Client] New connection, opening local socket")
         case Map.get(state.tunnels, tid) do
           nil ->
+            log_to_file("[Client] ERROR: Tunnel #{tid} not found!")
             state
 
           tunnel ->
+            log_to_file("[Client] Connecting to 127.0.0.1:#{tunnel.local}")
             case :gen_tcp.connect(~c"127.0.0.1", tunnel.local, [:binary, active: true], 5000) do
               {:ok, local_socket} ->
+                log_to_file("[Client] Connected! Sending #{byte_size(data)} bytes to local service")
                 :gen_tcp.send(local_socket, data)
                 new_connections = Map.put(state.local_connections, {tid, cid}, local_socket)
+                log_to_file("[Client] Stored connection: {#{tid}, #{cid}} -> #{inspect(local_socket)}")
                 %{state | local_connections: new_connections}
 
-              {:error, _reason} ->
+              {:error, reason} ->
+                log_to_file("[Client] ERROR: Failed to connect locally: #{inspect(reason)}")
                 # Send close back to server
                 frame = Protocol.encode_close(tid, cid)
                 send_data(state.transport, state.socket, frame)
@@ -534,6 +558,7 @@ defmodule Burrow.Client do
 
       local_socket ->
         # Local connections are always plain TCP
+        log_to_file("[Client] Existing connection, forwarding #{byte_size(data)} bytes")
         :gen_tcp.send(local_socket, data)
         emit_telemetry(:bytes_received, %{tunnel_id: tid, bytes: byte_size(data)})
         state
