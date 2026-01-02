@@ -159,13 +159,20 @@ Burrow.connect("server:4000",
 ```
 
 ### Graceful Shutdown
-**Status:** 📋 Planned
+**Status:** ✅ Completed
 
 Drain existing connections before stopping the server.
 
 ```elixir
 # Graceful shutdown with 30s drain period
-Burrow.Server.shutdown(server, drain_timeout: 30_000)
+Burrow.Server.shutdown(drain_timeout: 30_000)
+
+# Options:
+# - :drain_timeout - Time to wait for connections to drain (default: 30s)
+# - :notify_clients - Whether to notify clients (default: true)
+
+# Check if server is draining
+Burrow.Server.draining?()  # true/false
 ```
 
 ### Connection Pooling
