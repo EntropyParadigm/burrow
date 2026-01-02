@@ -76,13 +76,19 @@ defmodule Burrow.Server.ControlHandler do
   # Handle messages from public listeners
   # ThousandIsland handle_info/2 receives {socket, state} tuple as second arg
   def handle_info({:tunnel_data, tunnel_id, connection_id, data}, {socket, state}) do
-    log_to_file("[ControlHandler] Received tunnel_data: tunnel=#{tunnel_id}, conn=#{connection_id}, #{byte_size(data)} bytes")
-    frame = Protocol.encode_data(tunnel_id, connection_id, data)
-    case ThousandIsland.Socket.send(socket, frame) do
-      :ok -> log_to_file("[ControlHandler] Sent frame to client")
-      {:error, reason} -> log_to_file("[ControlHandler] Send FAILED: #{inspect(reason)}")
+    try do
+      log_to_file("[ControlHandler] Received tunnel_data: tunnel=#{tunnel_id}, conn=#{connection_id}, #{byte_size(data)} bytes")
+      frame = Protocol.encode_data(tunnel_id, connection_id, data)
+      case ThousandIsland.Socket.send(socket, frame) do
+        :ok -> log_to_file("[ControlHandler] Sent frame to client")
+        {:error, reason} -> log_to_file("[ControlHandler] Send FAILED: #{inspect(reason)}")
+      end
+      {:continue, state}
+    rescue
+      e ->
+        log_to_file("[ControlHandler] EXCEPTION in tunnel_data: #{inspect(e)}")
+        {:continue, state}
     end
-    {:continue, state}
   end
 
   def handle_info({:tunnel_closed, tunnel_id, connection_id}, {socket, state}) do
