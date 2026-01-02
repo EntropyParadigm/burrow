@@ -92,9 +92,7 @@ defmodule Burrow.Server.ControlHandler do
   end
 
   defp handle_frame(:auth, %{token: token}, socket, state) do
-    expected_token = get_server_token()
-
-    if token == expected_token do
+    if verify_token(token) do
       client_id = generate_client_id()
       frame = Protocol.encode_auth_ok(client_id)
       ThousandIsland.Socket.send(socket, frame)
@@ -172,10 +170,27 @@ defmodule Burrow.Server.ControlHandler do
     {:ok, state}
   end
 
-  defp get_server_token do
-    # Get token from Server state via Application env or config
-    Application.get_env(:burrow, :server_token, "default_token")
+  defp verify_token(provided_token) do
+    # Check for hashed token first, then plain token
+    case Application.get_env(:burrow, :server_token_hash) do
+      nil ->
+        # Plain token comparison
+        expected = Application.get_env(:burrow, :server_token, "default_token")
+        # Use constant-time comparison for security
+        secure_compare(provided_token, expected)
+
+      hash ->
+        # Verify against Argon2 hash
+        Burrow.Token.verify?(provided_token, hash)
+    end
   end
+
+  # Constant-time string comparison to prevent timing attacks
+  defp secure_compare(a, b) when is_binary(a) and is_binary(b) do
+    byte_size(a) == byte_size(b) and :crypto.hash_equals(a, b)
+  end
+
+  defp secure_compare(_, _), do: false
 
   defp generate_client_id do
     :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)

@@ -12,7 +12,8 @@ defmodule Burrow.Server do
   ## Options
 
   - `:port` - Listen port (required)
-  - `:token` - Authentication token (required)
+  - `:token` - Authentication token (required, unless using token_hash)
+  - `:token_hash` - Argon2 hash of token (alternative to plain token)
   - `:max_connections` - Max concurrent clients (default: `100`)
   - `:tls` - TLS configuration keyword list (optional)
     - `:certfile` - Path to TLS certificate (required for TLS)
@@ -109,10 +110,25 @@ defmodule Burrow.Server do
   @impl true
   def init(opts) do
     port = Keyword.fetch!(opts, :port)
-    token = Keyword.fetch!(opts, :token)
+    token = Keyword.get(opts, :token)
+    token_hash = Keyword.get(opts, :token_hash)
     max_connections = Keyword.get(opts, :max_connections, 100)
     on_connect = Keyword.get(opts, :on_connect)
     on_disconnect = Keyword.get(opts, :on_disconnect)
+
+    # Validate token configuration
+    unless token || token_hash do
+      raise ArgumentError, "either :token or :token_hash is required"
+    end
+
+    # Set token in application env for handlers
+    if token_hash do
+      Application.put_env(:burrow, :server_token_hash, token_hash)
+      Application.delete_env(:burrow, :server_token)
+    else
+      Application.put_env(:burrow, :server_token, token)
+      Application.delete_env(:burrow, :server_token_hash)
+    end
 
     # TLS configuration
     tls_opts = Keyword.get(opts, :tls)

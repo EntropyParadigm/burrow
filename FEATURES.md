@@ -44,7 +44,7 @@ Burrow.connect("server:4000",
 Alternative encryption using Noise_IK pattern (like WireGuard) for lower overhead.
 
 ### Token Hashing (Argon2)
-**Status:** 📋 Planned
+**Status:** ✅ Completed
 
 Store authentication tokens as Argon2 hashes on the server instead of plaintext.
 

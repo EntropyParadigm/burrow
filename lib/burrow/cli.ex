@@ -36,7 +36,9 @@ defmodule Burrow.CLI do
         tls_key: :string,
         tls_ca: :string,
         tls_verify: :boolean,
-        insecure: :boolean
+        insecure: :boolean,
+        # Token hashing
+        token_hash: :string
       ],
       aliases: [
         p: :port,
@@ -75,6 +77,14 @@ defmodule Burrow.CLI do
     run_client(opts)
   end
 
+  defp run_command(["hash-token" | rest], _opts) do
+    run_hash_token(rest)
+  end
+
+  defp run_command(["generate-token" | _], _opts) do
+    run_generate_token()
+  end
+
   defp run_command(["version" | _], _opts) do
     IO.puts("Burrow v#{Burrow.version()}")
   end
@@ -92,32 +102,32 @@ defmodule Burrow.CLI do
   defp run_server(opts) do
     port = Keyword.get(opts, :port, 4000)
     token = Keyword.get(opts, :token)
+    token_hash = Keyword.get(opts, :token_hash)
 
-    unless token do
-      IO.puts("Error: --token is required")
+    unless token || token_hash do
+      IO.puts("Error: --token or --token-hash is required")
       System.halt(1)
     end
 
     # Build TLS options if provided
     tls_opts = build_server_tls_opts(opts)
     tls_info = if tls_opts, do: " (TLS)", else: ""
+    hash_info = if token_hash, do: " (hashed token)", else: ""
 
-    IO.puts("Starting Burrow server on port #{port}#{tls_info}...")
-
-    # Set token in application env for handlers
-    Application.put_env(:burrow, :server_token, token)
+    IO.puts("Starting Burrow server on port #{port}#{tls_info}#{hash_info}...")
 
     # Start the application
     {:ok, _} = Application.ensure_all_started(:burrow)
 
     # Build server options
-    server_opts = [port: port, token: token]
+    server_opts = [port: port]
+    server_opts = if token_hash, do: Keyword.put(server_opts, :token_hash, token_hash), else: Keyword.put(server_opts, :token, token)
     server_opts = if tls_opts, do: Keyword.put(server_opts, :tls, tls_opts), else: server_opts
 
     # Start the server
     case Burrow.Server.start_link(server_opts) do
       {:ok, _pid} ->
-        IO.puts("Server listening on port #{port}#{tls_info}")
+        IO.puts("Server listening on port #{port}#{tls_info}#{hash_info}")
         IO.puts("Press Ctrl+C to stop.")
 
         # Keep running
@@ -184,6 +194,29 @@ defmodule Burrow.CLI do
     end
   end
 
+  defp run_hash_token([]) do
+    IO.puts("Error: token argument required")
+    IO.puts("Usage: burrow hash-token <token>")
+    System.halt(1)
+  end
+
+  defp run_hash_token([token | _]) do
+    {:ok, _} = Application.ensure_all_started(:argon2_elixir)
+    hash = Burrow.Token.hash(token)
+    IO.puts(hash)
+  end
+
+  defp run_generate_token do
+    token = Burrow.Token.generate()
+    IO.puts("Token: #{token}")
+    {:ok, _} = Application.ensure_all_started(:argon2_elixir)
+    hash = Burrow.Token.hash(token)
+    IO.puts("Hash:  #{hash}")
+    IO.puts("")
+    IO.puts("Save the token securely - you'll need it to connect clients.")
+    IO.puts("Use the hash in server config for secure token storage.")
+  end
+
   defp parse_tunnel(str) do
     case String.split(str, ":") do
       [name, local, remote] ->
@@ -239,14 +272,17 @@ defmodule Burrow.CLI do
         burrow <COMMAND> [OPTIONS]
 
     COMMANDS:
-        server      Start a Burrow server
-        client      Connect to a Burrow server
-        version     Print version information
-        help        Print this help message
+        server          Start a Burrow server
+        client          Connect to a Burrow server
+        hash-token      Hash a token for secure storage
+        generate-token  Generate a new token and hash
+        version         Print version information
+        help            Print this help message
 
     SERVER OPTIONS:
         -p, --port <PORT>       Listen port (default: 4000)
-        -t, --token <TOKEN>     Authentication token (required)
+        -t, --token <TOKEN>     Authentication token
+        --token-hash <HASH>     Argon2 hash of token (more secure)
         -c, --config <FILE>     Load config from file
         --tls-cert <FILE>       TLS certificate file (enables TLS)
         --tls-key <FILE>        TLS private key file
@@ -268,15 +304,24 @@ defmodule Burrow.CLI do
         -h, --help        Print help
 
     EXAMPLES:
-        # Start server (plain TCP)
+        # Generate a secure token
+        burrow generate-token
+
+        # Hash an existing token
+        burrow hash-token mysecret
+
+        # Start server with plain token
         burrow server --port 4000 --token mysecret
+
+        # Start server with hashed token (more secure)
+        burrow server --port 4000 --token-hash '$argon2id$v=19$...'
 
         # Start server with TLS
         burrow server --port 4000 --token mysecret \\
             --tls-cert /path/to/cert.pem \\
             --tls-key /path/to/key.pem
 
-        # Connect with tunnels (plain TCP)
+        # Connect with tunnels
         burrow client --server example.com:4000 --token mysecret \\
             --tunnel web:8080:80 \\
             --tunnel ssh:22:2222

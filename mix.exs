@@ -48,6 +48,9 @@ defmodule Burrow.MixProject do
       # CLI argument parsing
       {:optimus, "~> 0.5"},
 
+      # Password hashing (Argon2)
+      {:argon2_elixir, "~> 4.0"},
+
       # Documentation
       {:ex_doc, "~> 0.31", only: :dev, runtime: false}
     ]
