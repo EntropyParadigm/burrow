@@ -1,0 +1,339 @@
+defmodule Burrow.Server do
+  @moduledoc """
+  Burrow tunnel server - accepts client connections and manages tunnels.
+
+  ## Usage
+
+      {:ok, server} = Burrow.Server.start_link(
+        port: 4000,
+        token: "secret"
+      )
+
+  ## Options
+
+  - `:port` - Listen port (required)
+  - `:token` - Authentication token (required)
+  - `:max_connections` - Max concurrent clients (default: `100`)
+  - `:on_connect` - Callback when client connects (optional)
+  - `:on_disconnect` - Callback when client disconnects (optional)
+  """
+
+  use GenServer
+  require Logger
+
+  alias Burrow.Protocol
+  alias Burrow.Server.{ControlHandler, PublicListener}
+
+  defstruct [
+    :port,
+    :token,
+    :listener,
+    :max_connections,
+    :on_connect,
+    :on_disconnect,
+    :clients,
+    :tunnels,
+    :public_listeners,
+    :next_client_id
+  ]
+
+  # Client API
+
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  @doc """
+  List all connected clients.
+  """
+  def clients(server \\ __MODULE__) do
+    GenServer.call(server, :list_clients)
+  end
+
+  @doc """
+  Get server metrics.
+  """
+  def metrics(server \\ __MODULE__) do
+    GenServer.call(server, :metrics)
+  end
+
+  @doc """
+  Disconnect a specific client.
+  """
+  def disconnect_client(server \\ __MODULE__, client_id) do
+    GenServer.call(server, {:disconnect_client, client_id})
+  end
+
+  # Callbacks for internal use
+  def client_authenticated(client_pid, client_id) do
+    GenServer.cast(__MODULE__, {:client_authenticated, client_pid, client_id})
+  end
+
+  def client_disconnected(client_id) do
+    GenServer.cast(__MODULE__, {:client_disconnected, client_id})
+  end
+
+  def register_tunnel(client_id, tunnel_id, port, name, protocol) do
+    GenServer.call(__MODULE__, {:register_tunnel, client_id, tunnel_id, port, name, protocol})
+  end
+
+  def unregister_tunnel(client_id, tunnel_id) do
+    GenServer.cast(__MODULE__, {:unregister_tunnel, client_id, tunnel_id})
+  end
+
+  def get_client_for_tunnel(port) do
+    GenServer.call(__MODULE__, {:get_client_for_tunnel, port})
+  end
+
+  # Server callbacks
+
+  @impl true
+  def init(opts) do
+    port = Keyword.fetch!(opts, :port)
+    token = Keyword.fetch!(opts, :token)
+    max_connections = Keyword.get(opts, :max_connections, 100)
+    on_connect = Keyword.get(opts, :on_connect)
+    on_disconnect = Keyword.get(opts, :on_disconnect)
+
+    state = %__MODULE__{
+      port: port,
+      token: token,
+      listener: nil,
+      max_connections: max_connections,
+      on_connect: on_connect,
+      on_disconnect: on_disconnect,
+      clients: %{},
+      tunnels: %{},
+      public_listeners: %{},
+      next_client_id: 1
+    }
+
+    # Start the control connection listener
+    case start_control_listener(port) do
+      {:ok, listener} ->
+        Logger.info("[Burrow.Server] Listening on port #{port}")
+        {:ok, %{state | listener: listener}}
+
+      {:error, reason} ->
+        {:stop, reason}
+    end
+  end
+
+  @impl true
+  def handle_call(:list_clients, _from, state) do
+    clients = Enum.map(state.clients, fn {id, info} ->
+      %{
+        id: id,
+        tunnels: Map.get(state.tunnels, id, []),
+        connected_at: info.connected_at
+      }
+    end)
+
+    {:reply, clients, state}
+  end
+
+  @impl true
+  def handle_call(:metrics, _from, state) do
+    metrics = %{
+      clients: map_size(state.clients),
+      tunnels: state.tunnels |> Map.values() |> List.flatten() |> length(),
+      public_listeners: map_size(state.public_listeners)
+    }
+
+    {:reply, metrics, state}
+  end
+
+  @impl true
+  def handle_call({:disconnect_client, client_id}, _from, state) do
+    case Map.get(state.clients, client_id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      %{pid: pid} ->
+        send(pid, :disconnect)
+        {:reply, :ok, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:register_tunnel, client_id, tunnel_id, requested_port, name, protocol}, _from, state) do
+    # Try to bind to the requested port
+    case start_public_listener(requested_port, client_id, tunnel_id) do
+      {:ok, listener, actual_port} ->
+        tunnel_info = %{
+          id: tunnel_id,
+          port: actual_port,
+          name: name,
+          protocol: protocol
+        }
+
+        client_tunnels = Map.get(state.tunnels, client_id, [])
+        new_tunnels = Map.put(state.tunnels, client_id, [tunnel_info | client_tunnels])
+        new_listeners = Map.put(state.public_listeners, actual_port, %{
+          listener: listener,
+          client_id: client_id,
+          tunnel_id: tunnel_id
+        })
+
+        Logger.info("[Burrow.Server] Tunnel '#{name}' opened on port #{actual_port} for client #{client_id}")
+
+        {:reply, {:ok, actual_port}, %{state | tunnels: new_tunnels, public_listeners: new_listeners}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:get_client_for_tunnel, port}, _from, state) do
+    case Map.get(state.public_listeners, port) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      %{client_id: client_id, tunnel_id: tunnel_id} ->
+        case Map.get(state.clients, client_id) do
+          nil ->
+            {:reply, {:error, :client_gone}, state}
+
+          %{pid: pid} ->
+            {:reply, {:ok, pid, tunnel_id}, state}
+        end
+    end
+  end
+
+  @impl true
+  def handle_cast({:client_authenticated, pid, client_id}, state) do
+    Process.monitor(pid)
+
+    client_info = %{
+      pid: pid,
+      connected_at: DateTime.utc_now()
+    }
+
+    if state.on_connect do
+      state.on_connect.(%{id: client_id})
+    end
+
+    emit_telemetry(:client_connected, %{client_id: client_id})
+    Logger.info("[Burrow.Server] Client #{client_id} connected")
+
+    {:noreply, %{state | clients: Map.put(state.clients, client_id, client_info)}}
+  end
+
+  @impl true
+  def handle_cast({:client_disconnected, client_id}, state) do
+    state = cleanup_client(state, client_id)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_cast({:unregister_tunnel, client_id, tunnel_id}, state) do
+    # Find and stop the public listener for this tunnel
+    {port, _} = Enum.find(state.public_listeners, {nil, nil}, fn {_port, info} ->
+      info.client_id == client_id && info.tunnel_id == tunnel_id
+    end)
+
+    state =
+      if port do
+        case Map.get(state.public_listeners, port) do
+          %{listener: listener} ->
+            ThousandIsland.stop(listener)
+            %{state | public_listeners: Map.delete(state.public_listeners, port)}
+
+          nil ->
+            state
+        end
+      else
+        state
+      end
+
+    # Remove from tunnels
+    client_tunnels = Map.get(state.tunnels, client_id, [])
+    new_tunnels = Enum.reject(client_tunnels, &(&1.id == tunnel_id))
+
+    {:noreply, %{state | tunnels: Map.put(state.tunnels, client_id, new_tunnels)}}
+  end
+
+  @impl true
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    # Find and cleanup the disconnected client
+    case Enum.find(state.clients, fn {_id, info} -> info.pid == pid end) do
+      {client_id, _info} ->
+        state = cleanup_client(state, client_id)
+        {:noreply, state}
+
+      nil ->
+        {:noreply, state}
+    end
+  end
+
+  @impl true
+  def handle_info(_msg, state) do
+    {:noreply, state}
+  end
+
+  # Private functions
+
+  defp start_control_listener(port) do
+    ThousandIsland.start_link(
+      port: port,
+      handler_module: Burrow.Server.ControlHandler,
+      handler_options: []
+    )
+  end
+
+  defp start_public_listener(requested_port, client_id, tunnel_id) do
+    # Try requested port, or find an available one
+    port = if requested_port > 0, do: requested_port, else: find_available_port()
+
+    case ThousandIsland.start_link(
+      port: port,
+      handler_module: Burrow.Server.PublicHandler,
+      handler_options: [client_id: client_id, tunnel_id: tunnel_id]
+    ) do
+      {:ok, pid} ->
+        {:ok, pid, port}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp find_available_port do
+    # Let the OS assign a port
+    {:ok, socket} = :gen_tcp.listen(0, [:binary])
+    {:ok, port} = :inet.port(socket)
+    :gen_tcp.close(socket)
+    port
+  end
+
+  defp cleanup_client(state, client_id) do
+    if state.on_disconnect do
+      state.on_disconnect.(%{id: client_id}, :disconnected)
+    end
+
+    emit_telemetry(:client_disconnected, %{client_id: client_id})
+    Logger.info("[Burrow.Server] Client #{client_id} disconnected")
+
+    # Stop all public listeners for this client
+    state.public_listeners
+    |> Enum.filter(fn {_port, info} -> info.client_id == client_id end)
+    |> Enum.each(fn {_port, %{listener: listener}} ->
+      ThousandIsland.stop(listener)
+    end)
+
+    new_listeners = state.public_listeners
+    |> Enum.reject(fn {_port, info} -> info.client_id == client_id end)
+    |> Map.new()
+
+    %{state |
+      clients: Map.delete(state.clients, client_id),
+      tunnels: Map.delete(state.tunnels, client_id),
+      public_listeners: new_listeners
+    }
+  end
+
+  defp emit_telemetry(event, data) do
+    :telemetry.execute([:burrow, :server, event], %{}, data)
+  end
+end

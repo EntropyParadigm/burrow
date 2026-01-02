@@ -1,0 +1,183 @@
+defmodule Burrow.Server.ControlHandler do
+  @moduledoc """
+  Handles control connections from Burrow clients.
+  """
+
+  use ThousandIsland.Handler
+  require Logger
+
+  alias Burrow.Protocol
+
+  @impl ThousandIsland.Handler
+  def handle_connection(socket, state) do
+    {:continue, Map.merge(state, %{
+      socket: socket,
+      buffer: <<>>,
+      authenticated: false,
+      client_id: nil,
+      next_connection_id: 1,
+      remote_connections: %{}
+    })}
+  end
+
+  @impl ThousandIsland.Handler
+  def handle_data(data, socket, state) do
+    buffer = state.buffer <> data
+    process_frames(socket, buffer, state)
+  end
+
+  @impl ThousandIsland.Handler
+  def handle_close(_socket, state) do
+    if state.client_id do
+      Burrow.Server.client_disconnected(state.client_id)
+    end
+
+    :ok
+  end
+
+  @impl ThousandIsland.Handler
+  def handle_shutdown(_socket, state) do
+    if state.client_id do
+      Burrow.Server.client_disconnected(state.client_id)
+    end
+
+    :ok
+  end
+
+  # Handle messages from public listeners
+  @impl ThousandIsland.Handler
+  def handle_info({:tunnel_data, tunnel_id, connection_id, data}, socket, state) do
+    frame = Protocol.encode_data(tunnel_id, connection_id, data)
+    ThousandIsland.Socket.send(socket, frame)
+    {:continue, state}
+  end
+
+  def handle_info({:tunnel_closed, tunnel_id, connection_id}, socket, state) do
+    frame = Protocol.encode_close(tunnel_id, connection_id)
+    ThousandIsland.Socket.send(socket, frame)
+
+    new_connections = Map.delete(state.remote_connections, {tunnel_id, connection_id})
+    {:continue, %{state | remote_connections: new_connections}}
+  end
+
+  def handle_info({:new_connection, tunnel_id, connection_id, handler_pid}, _socket, state) do
+    new_connections = Map.put(state.remote_connections, {tunnel_id, connection_id}, handler_pid)
+    {:continue, %{state | remote_connections: new_connections}}
+  end
+
+  def handle_info(_msg, _socket, state) do
+    {:continue, state}
+  end
+
+  # Private functions
+
+  defp process_frames(socket, buffer, state) do
+    case Protocol.decode(buffer) do
+      {:ok, type, payload, rest} ->
+        case handle_frame(type, payload, socket, state) do
+          {:ok, new_state} ->
+            process_frames(socket, rest, new_state)
+
+          {:close, reason} ->
+            {:close, reason}
+        end
+
+      {:incomplete, remaining} ->
+        {:continue, %{state | buffer: remaining}}
+
+      {:error, reason} ->
+        Logger.error("[ControlHandler] Protocol error: #{inspect(reason)}")
+        {:continue, %{state | buffer: <<>>}}
+    end
+  end
+
+  defp handle_frame(:auth, %{token: token}, socket, state) do
+    expected_token = get_server_token()
+
+    if token == expected_token do
+      client_id = generate_client_id()
+      frame = Protocol.encode_auth_ok(client_id)
+      ThousandIsland.Socket.send(socket, frame)
+
+      Burrow.Server.client_authenticated(self(), client_id)
+
+      {:ok, %{state | authenticated: true, client_id: client_id}}
+    else
+      frame = Protocol.encode_auth_fail("invalid_token")
+      ThousandIsland.Socket.send(socket, frame)
+      {:close, :auth_failed}
+    end
+  end
+
+  defp handle_frame(:tunnel_req, payload, socket, state) do
+    if state.authenticated do
+      %{tunnel_id: tunnel_id, name: name, remote_port: remote_port, protocol: protocol} = payload
+
+      case Burrow.Server.register_tunnel(state.client_id, tunnel_id, remote_port, name, protocol) do
+        {:ok, actual_port} ->
+          frame = Protocol.encode_tunnel_ok(tunnel_id, actual_port)
+          ThousandIsland.Socket.send(socket, frame)
+          {:ok, state}
+
+        {:error, reason} ->
+          frame = Protocol.encode_tunnel_fail(tunnel_id, to_string(reason))
+          ThousandIsland.Socket.send(socket, frame)
+          {:ok, state}
+      end
+    else
+      {:close, :not_authenticated}
+    end
+  end
+
+  defp handle_frame(:data, %{tunnel_id: tid, connection_id: cid, data: data}, _socket, state) do
+    case Map.get(state.remote_connections, {tid, cid}) do
+      nil ->
+        # Unknown connection
+        {:ok, state}
+
+      handler_pid ->
+        send(handler_pid, {:client_data, data})
+        {:ok, state}
+    end
+  end
+
+  defp handle_frame(:ping, %{timestamp: ts}, socket, state) do
+    frame = Protocol.encode_pong(ts)
+    ThousandIsland.Socket.send(socket, frame)
+    {:ok, state}
+  end
+
+  defp handle_frame(:pong, _payload, _socket, state) do
+    {:ok, state}
+  end
+
+  defp handle_frame(:close, %{tunnel_id: tid, connection_id: cid}, _socket, state) do
+    case Map.get(state.remote_connections, {tid, cid}) do
+      nil ->
+        {:ok, state}
+
+      handler_pid ->
+        send(handler_pid, :close)
+        new_connections = Map.delete(state.remote_connections, {tid, cid})
+        {:ok, %{state | remote_connections: new_connections}}
+    end
+  end
+
+  defp handle_frame(:shutdown, _payload, _socket, _state) do
+    {:close, :client_shutdown}
+  end
+
+  defp handle_frame(type, payload, _socket, state) do
+    Logger.warning("[ControlHandler] Unknown frame: #{inspect(type)} - #{inspect(payload)}")
+    {:ok, state}
+  end
+
+  defp get_server_token do
+    # Get token from Server state via Application env or config
+    Application.get_env(:burrow, :server_token, "default_token")
+  end
+
+  defp generate_client_id do
+    :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+  end
+end
