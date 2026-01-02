@@ -9,11 +9,18 @@ defmodule Burrow.Server.PublicHandler do
 
   @impl ThousandIsland.Handler
   def handle_connection(_socket, state) do
-    client_id = state.handler_options[:client_id]
-    tunnel_id = state.handler_options[:tunnel_id]
+    # State might be a keyword list (handler_options) or a map
+    # Extract options from the appropriate source
+    opts = get_handler_options(state)
+    client_id = opts[:client_id]
+    tunnel_id = opts[:tunnel_id]
+    port = opts[:port] || 0
+
+    # Ensure we have a map for state
+    base_state = if is_map(state), do: state, else: %{}
 
     # Get the control handler for this client
-    case Burrow.Server.get_client_for_tunnel(get_port(state)) do
+    case Burrow.Server.get_client_for_tunnel(port) do
       {:ok, control_pid, ^tunnel_id} ->
         # Generate connection ID
         connection_id = :erlang.unique_integer([:positive])
@@ -21,11 +28,12 @@ defmodule Burrow.Server.PublicHandler do
         # Notify control handler of new connection
         send(control_pid, {:new_connection, tunnel_id, connection_id, self()})
 
-        {:continue, Map.merge(state, %{
+        {:continue, Map.merge(base_state, %{
           control_pid: control_pid,
           tunnel_id: tunnel_id,
           connection_id: connection_id,
-          client_id: client_id
+          client_id: client_id,
+          port: port
         })}
 
       _ ->
@@ -71,9 +79,9 @@ defmodule Burrow.Server.PublicHandler do
     {:continue, state}
   end
 
-  defp get_port(state) do
-    # This is a bit of a hack - we need to get the port we're listening on
-    # The handler_options should contain it
-    state.handler_options[:port] || 0
+  # Extract handler options from state (might be keyword list or map)
+  defp get_handler_options(state) when is_list(state), do: state
+  defp get_handler_options(state) when is_map(state) do
+    Map.get(state, :handler_options, [])
   end
 end
