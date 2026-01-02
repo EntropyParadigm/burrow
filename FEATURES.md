@@ -81,20 +81,25 @@ Burrow.RateLimiter.stats()                  # Get current stats
 ```
 
 ### IP Allowlisting
-**Status:** 📋 Planned
+**Status:** ✅ Completed
 
-Server-side configuration to restrict which IPs can connect.
+Server-side configuration to restrict which IPs can connect. Supports CIDR notation.
 
 ```elixir
-Burrow.Server.start_link(
-  port: 4000,
-  token: "secret",
-  allowed_ips: [
+# Enable via application config
+config :burrow, :ip_filter,
+  enabled: true,
+  mode: :allowlist,  # or :blocklist
+  addresses: [
     "192.168.1.0/24",
     "10.0.0.0/8",
     "203.0.113.50"
   ]
-)
+
+# API functions
+Burrow.IPFilter.allowed?("192.168.1.100")  # true/false
+Burrow.IPFilter.enabled?()                 # true/false
+Burrow.IPFilter.parse_cidr("10.0.0.0/8")   # {:ok, {tuple, prefix}}
 ```
 
 ### Client Certificates (mTLS)

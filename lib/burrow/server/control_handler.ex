@@ -10,26 +10,32 @@ defmodule Burrow.Server.ControlHandler do
 
   @impl ThousandIsland.Handler
   def handle_connection(socket, state) do
-    # Get client IP for rate limiting
+    # Get client IP for filtering and rate limiting
     client_ip = get_client_ip(socket)
 
-    # Check rate limit before allowing connection
-    case Burrow.RateLimiter.check_connection(client_ip) do
-      :ok ->
-        Burrow.RateLimiter.record_connection(client_ip)
-        {:continue, Map.merge(state, %{
-          socket: socket,
-          buffer: <<>>,
-          authenticated: false,
-          client_id: nil,
-          client_ip: client_ip,
-          next_connection_id: 1,
-          remote_connections: %{}
-        })}
+    # Check IP allowlist/blocklist first
+    unless Burrow.IPFilter.allowed?(client_ip) do
+      Logger.warning("[ControlHandler] Connection rejected (IP filtered): #{client_ip}")
+      {:close, :ip_filtered}
+    else
+      # Check rate limit before allowing connection
+      case Burrow.RateLimiter.check_connection(client_ip) do
+        :ok ->
+          Burrow.RateLimiter.record_connection(client_ip)
+          {:continue, Map.merge(state, %{
+            socket: socket,
+            buffer: <<>>,
+            authenticated: false,
+            client_id: nil,
+            client_ip: client_ip,
+            next_connection_id: 1,
+            remote_connections: %{}
+          })}
 
-      {:error, :rate_limited} ->
-        Logger.warning("[ControlHandler] Connection rejected (rate limited): #{client_ip}")
-        {:close, :rate_limited}
+        {:error, :rate_limited} ->
+          Logger.warning("[ControlHandler] Connection rejected (rate limited): #{client_ip}")
+          {:close, :rate_limited}
+      end
     end
   end
 
