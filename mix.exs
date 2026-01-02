@@ -42,8 +42,12 @@ defmodule Burrow.MixProject do
       # TOML config parsing
       {:toml, "~> 0.7"},
 
-      # Telemetry
+      # Telemetry and Prometheus
       {:telemetry, "~> 1.2"},
+      {:telemetry_metrics, "~> 0.6"},
+      {:telemetry_poller, "~> 1.0"},
+      {:plug, "~> 1.14"},
+      {:plug_cowboy, "~> 2.6"},
 
       # CLI argument parsing
       {:optimus, "~> 0.5"},

@@ -254,7 +254,7 @@ Burrow.connect("server:4000",
 ## Observability Features
 
 ### Prometheus Metrics
-**Status:** 📋 Planned
+**Status:** ✅ Completed
 
 Export telemetry metrics to Prometheus.
 
@@ -263,10 +263,19 @@ Export telemetry metrics to Prometheus.
 {Burrow.Metrics.Prometheus, port: 9090}
 
 # Metrics exported:
-# - burrow_connections_total
-# - burrow_connections_current
-# - burrow_bytes_transferred_total
-# - burrow_tunnel_latency_seconds
+# - burrow_connections_total (counter)
+# - burrow_connections_current (gauge)
+# - burrow_tunnels_total (counter)
+# - burrow_tunnels_current (gauge)
+# - burrow_bytes_sent_total (counter)
+# - burrow_bytes_received_total (counter)
+# - burrow_auth_failures_total (counter)
+# - burrow_rate_limited_total (counter)
+# - burrow_tunnel_latency_seconds (histogram)
+
+# Endpoints:
+# GET /metrics - Prometheus metrics
+# GET /health  - Health check endpoint
 ```
 
 ### Web Dashboard
