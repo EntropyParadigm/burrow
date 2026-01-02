@@ -74,41 +74,40 @@ defmodule Burrow.Server.ControlHandler do
   end
 
   # Handle messages from public listeners
-  # ThousandIsland handle_info/2 receives {socket, state} tuple as second arg
+  # ThousandIsland uses GenServer callbacks for handle_info
+  # Must return {:noreply, {socket, state}, timeout}
+  @impl GenServer
   def handle_info({:tunnel_data, tunnel_id, connection_id, data}, {socket, state}) do
-    try do
-      log_to_file("[ControlHandler] Received tunnel_data: tunnel=#{tunnel_id}, conn=#{connection_id}, #{byte_size(data)} bytes")
-      frame = Protocol.encode_data(tunnel_id, connection_id, data)
-      case ThousandIsland.Socket.send(socket, frame) do
-        :ok -> log_to_file("[ControlHandler] Sent frame to client")
-        {:error, reason} -> log_to_file("[ControlHandler] Send FAILED: #{inspect(reason)}")
-      end
-      {:continue, state}
-    rescue
-      e ->
-        log_to_file("[ControlHandler] EXCEPTION in tunnel_data: #{inspect(e)}")
-        {:continue, state}
+    log_to_file("[ControlHandler] Received tunnel_data: tunnel=#{tunnel_id}, conn=#{connection_id}, #{byte_size(data)} bytes")
+    frame = Protocol.encode_data(tunnel_id, connection_id, data)
+    case ThousandIsland.Socket.send(socket, frame) do
+      :ok -> log_to_file("[ControlHandler] Sent frame to client")
+      {:error, reason} -> log_to_file("[ControlHandler] Send FAILED: #{inspect(reason)}")
     end
+    {:noreply, {socket, state}, socket.read_timeout}
   end
 
+  @impl GenServer
   def handle_info({:tunnel_closed, tunnel_id, connection_id}, {socket, state}) do
     log_to_file("[ControlHandler] tunnel_closed: tunnel=#{tunnel_id}, conn=#{connection_id}")
     frame = Protocol.encode_close(tunnel_id, connection_id)
     ThousandIsland.Socket.send(socket, frame)
 
     new_connections = Map.delete(state.remote_connections, {tunnel_id, connection_id})
-    {:continue, %{state | remote_connections: new_connections}}
+    {:noreply, {socket, %{state | remote_connections: new_connections}}, socket.read_timeout}
   end
 
-  def handle_info({:new_connection, tunnel_id, connection_id, handler_pid}, {_socket, state}) do
+  @impl GenServer
+  def handle_info({:new_connection, tunnel_id, connection_id, handler_pid}, {socket, state}) do
     log_to_file("[ControlHandler] new_connection: tunnel=#{tunnel_id}, conn=#{connection_id}, handler=#{inspect(handler_pid)}")
     new_connections = Map.put(state.remote_connections, {tunnel_id, connection_id}, handler_pid)
-    {:continue, %{state | remote_connections: new_connections}}
+    {:noreply, {socket, %{state | remote_connections: new_connections}}, socket.read_timeout}
   end
 
-  def handle_info(msg, {_socket, state}) do
+  @impl GenServer
+  def handle_info(msg, {socket, state}) do
     log_to_file("[ControlHandler] Unknown message: #{inspect(msg)}")
-    {:continue, state}
+    {:noreply, {socket, state}, socket.read_timeout}
   end
 
   # Private functions
