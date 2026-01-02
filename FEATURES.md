@@ -301,33 +301,37 @@ Burrow.Server.start_link(
 ```
 
 ### Access Logging
-**Status:** 📋 Planned
+**Status:** ✅ Completed
 
-Detailed logging of connections and data transfer.
+Detailed logging of connections, tunnels, and data transfer with rotation.
 
 ```elixir
-Burrow.Server.start_link(
-  port: 4000,
-  token: "secret",
-  access_log: [
-    enabled: true,
-    format: :json,
-    file: "/var/log/burrow/access.log"
-  ]
-)
+# Configuration
+config :burrow, :access_log,
+  enabled: true,
+  file: "/var/log/burrow/access.log",
+  format: :json,  # or :text
+  rotate: true,
+  max_size_mb: 100
+
+# Add to supervision tree
+{Burrow.AccessLog, []}
+
+# Manual logging
+Burrow.AccessLog.log_connection(client_id, ip)
+Burrow.AccessLog.log_tunnel(:opened, client_id, "web", 8080)
+Burrow.AccessLog.log_transfer(client_id, "web", bytes_in, bytes_out)
 ```
 
-Log format:
+Log format (JSON):
 ```json
 {
   "timestamp": "2024-01-15T10:30:00Z",
-  "client_id": "abc123",
-  "client_ip": "192.168.1.100",
-  "tunnel": "web",
-  "remote_port": 80,
-  "bytes_in": 1024,
-  "bytes_out": 4096,
-  "duration_ms": 150
+  "event": "connection",
+  "data": {
+    "client_id": "abc123",
+    "client_ip": "192.168.1.100"
+  }
 }
 ```
 
