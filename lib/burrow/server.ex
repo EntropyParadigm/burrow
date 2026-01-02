@@ -14,8 +14,24 @@ defmodule Burrow.Server do
   - `:port` - Listen port (required)
   - `:token` - Authentication token (required)
   - `:max_connections` - Max concurrent clients (default: `100`)
+  - `:tls` - TLS configuration keyword list (optional)
+    - `:certfile` - Path to TLS certificate (required for TLS)
+    - `:keyfile` - Path to TLS private key (required for TLS)
+    - `:cacertfile` - Path to CA certificate (optional, for client verification)
+    - `:verify` - `:verify_peer` or `:verify_none` (default: `:verify_none`)
   - `:on_connect` - Callback when client connects (optional)
   - `:on_disconnect` - Callback when client disconnects (optional)
+
+  ## TLS Example
+
+      {:ok, server} = Burrow.Server.start_link(
+        port: 4000,
+        token: "secret",
+        tls: [
+          certfile: "/path/to/cert.pem",
+          keyfile: "/path/to/key.pem"
+        ]
+      )
   """
 
   use GenServer
@@ -35,7 +51,9 @@ defmodule Burrow.Server do
     :clients,
     :tunnels,
     :public_listeners,
-    :next_client_id
+    :next_client_id,
+    :tls,
+    :tls_opts
   ]
 
   # Client API
@@ -96,6 +114,10 @@ defmodule Burrow.Server do
     on_connect = Keyword.get(opts, :on_connect)
     on_disconnect = Keyword.get(opts, :on_disconnect)
 
+    # TLS configuration
+    tls_opts = Keyword.get(opts, :tls)
+    tls_enabled = tls_opts != nil
+
     state = %__MODULE__{
       port: port,
       token: token,
@@ -106,13 +128,16 @@ defmodule Burrow.Server do
       clients: %{},
       tunnels: %{},
       public_listeners: %{},
-      next_client_id: 1
+      next_client_id: 1,
+      tls: tls_enabled,
+      tls_opts: tls_opts
     }
 
     # Start the control connection listener
-    case start_control_listener(port) do
+    case start_control_listener(port, tls_opts) do
       {:ok, listener} ->
-        Logger.info("[Burrow.Server] Listening on port #{port}")
+        tls_info = if tls_enabled, do: " (TLS)", else: ""
+        Logger.info("[Burrow.Server] Listening on port #{port}#{tls_info}")
         {:ok, %{state | listener: listener}}
 
       {:error, reason} ->
@@ -275,12 +300,45 @@ defmodule Burrow.Server do
 
   # Private functions
 
-  defp start_control_listener(port) do
+  defp start_control_listener(port, nil) do
+    # Plain TCP
     ThousandIsland.start_link(
       port: port,
       handler_module: Burrow.Server.ControlHandler,
       handler_options: []
     )
+  end
+
+  defp start_control_listener(port, tls_opts) when is_list(tls_opts) do
+    # TLS enabled
+    transport_opts = build_transport_opts(tls_opts)
+
+    ThousandIsland.start_link(
+      port: port,
+      handler_module: Burrow.Server.ControlHandler,
+      handler_options: [],
+      transport_module: ThousandIsland.Transports.SSL,
+      transport_options: transport_opts
+    )
+  end
+
+  defp build_transport_opts(tls_opts) do
+    base_opts = [
+      certfile: Keyword.fetch!(tls_opts, :certfile),
+      keyfile: Keyword.fetch!(tls_opts, :keyfile),
+      versions: [:"tlsv1.3", :"tlsv1.2"]
+    ]
+
+    # Optional CA cert for client verification
+    base_opts =
+      case Keyword.get(tls_opts, :cacertfile) do
+        nil -> base_opts
+        path -> Keyword.put(base_opts, :cacertfile, path)
+      end
+
+    # Verification mode
+    verify = Keyword.get(tls_opts, :verify, :verify_none)
+    Keyword.put(base_opts, :verify, verify)
   end
 
   defp start_public_listener(requested_port, client_id, tunnel_id) do

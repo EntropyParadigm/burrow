@@ -15,7 +15,7 @@ This document tracks planned features and enhancements for Burrow, the Elixir TC
 ## Security Features
 
 ### TLS/SSL Encryption
-**Status:** 📋 Planned
+**Status:** ✅ Completed
 
 End-to-end encryption using TLS 1.3 for control connections.
 
