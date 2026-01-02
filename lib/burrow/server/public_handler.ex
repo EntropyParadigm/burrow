@@ -91,18 +91,28 @@ defmodule Burrow.Server.PublicHandler do
   end
 
   # Handle data from client (via control handler)
-  # ThousandIsland handle_info/2 receives {socket, state} tuple as second arg
+  # ThousandIsland uses GenServer callbacks for handle_info
+  # Must return {:noreply, {socket, state}, timeout}
+  @impl GenServer
   def handle_info({:client_data, data}, {socket, state}) do
-    ThousandIsland.Socket.send(socket, data)
-    {:continue, state}
+    log_to_file("[PublicHandler] Received client_data: #{byte_size(data)} bytes")
+    case ThousandIsland.Socket.send(socket, data) do
+      :ok -> log_to_file("[PublicHandler] Sent to public socket")
+      {:error, reason} -> log_to_file("[PublicHandler] Send FAILED: #{inspect(reason)}")
+    end
+    {:noreply, {socket, state}, socket.read_timeout}
   end
 
-  def handle_info(:close, {_socket, _state}) do
-    {:close, :client_closed}
+  @impl GenServer
+  def handle_info(:close, {socket, _state}) do
+    log_to_file("[PublicHandler] Received close message")
+    {:stop, :normal, {socket, _state}}
   end
 
-  def handle_info(_msg, {_socket, state}) do
-    {:continue, state}
+  @impl GenServer
+  def handle_info(msg, {socket, state}) do
+    log_to_file("[PublicHandler] Unknown message: #{inspect(msg)}")
+    {:noreply, {socket, state}, socket.read_timeout}
   end
 
   # Extract handler options from state (might be keyword list or map)
