@@ -327,7 +327,7 @@ Log format:
 ## Configuration Features
 
 ### TOML Config File
-**Status:** 📋 Planned
+**Status:** ✅ Completed
 
 Load settings from TOML configuration file.
 
@@ -335,8 +335,11 @@ Load settings from TOML configuration file.
 # /etc/burrow/server.toml
 [server]
 port = 4000
-token = "secret"
 max_connections = 100
+
+[auth]
+token = "secret"
+# token_hash = "$argon2id$..."  # Use hash for security
 
 [tls]
 enabled = true
@@ -344,8 +347,15 @@ cert_file = "/etc/burrow/cert.pem"
 key_file = "/etc/burrow/key.pem"
 
 [rate_limit]
-max_connections_per_client = 10
+enabled = true
+max_connections_per_minute = 10
+max_tunnels_per_client = 5
 max_bandwidth_mbps = 100
+
+[ip_filter]
+enabled = true
+mode = "allowlist"
+addresses = ["192.168.0.0/16", "10.0.0.0/8"]
 
 [logging]
 level = "info"
@@ -353,7 +363,11 @@ access_log = "/var/log/burrow/access.log"
 ```
 
 ```bash
+# Load from config file
 ./burrow server --config /etc/burrow/server.toml
+
+# CLI options override config file
+./burrow server --config server.toml --port 5000
 ```
 
 ### Hot Reload

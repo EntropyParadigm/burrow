@@ -100,21 +100,34 @@ defmodule Burrow.CLI do
   end
 
   defp run_server(opts) do
-    port = Keyword.get(opts, :port, 4000)
-    token = Keyword.get(opts, :token)
-    token_hash = Keyword.get(opts, :token_hash)
+    # Load config from file if specified
+    {config, file_opts} = load_config_file(opts)
+
+    # Merge file config with CLI options (CLI takes precedence)
+    server_opts = if config do
+      Burrow.Config.apply_to_env(config)
+      Burrow.Config.server_opts(config)
+    else
+      []
+    end
+
+    # CLI options override file config
+    port = Keyword.get(opts, :port) || Keyword.get(server_opts, :port, 4000)
+    token = Keyword.get(opts, :token) || Keyword.get(server_opts, :token)
+    token_hash = Keyword.get(opts, :token_hash) || Keyword.get(server_opts, :token_hash)
 
     unless token || token_hash do
-      IO.puts("Error: --token or --token-hash is required")
+      IO.puts("Error: --token or --token-hash is required (via CLI or config file)")
       System.halt(1)
     end
 
-    # Build TLS options if provided
-    tls_opts = build_server_tls_opts(opts)
+    # Build TLS options if provided (CLI overrides config)
+    tls_opts = build_server_tls_opts(opts) || Keyword.get(server_opts, :tls)
     tls_info = if tls_opts, do: " (TLS)", else: ""
     hash_info = if token_hash, do: " (hashed token)", else: ""
+    config_info = if file_opts[:config], do: " [config: #{file_opts[:config]}]", else: ""
 
-    IO.puts("Starting Burrow server on port #{port}#{tls_info}#{hash_info}...")
+    IO.puts("Starting Burrow server on port #{port}#{tls_info}#{hash_info}#{config_info}...")
 
     # Start the application
     {:ok, _} = Application.ensure_all_started(:burrow)
@@ -330,7 +343,30 @@ defmodule Burrow.CLI do
         burrow client --server example.com:4000 --token mysecret --tls \\
             --tunnel web:8080:80
 
+        # Start server from config file
+        burrow server --config /etc/burrow/server.toml
+
+        # Start client from config file
+        burrow client --config ~/.burrow/client.toml
+
     For more information, visit: https://github.com/EntropyParadigm/burrow
     """)
+  end
+
+  defp load_config_file(opts) do
+    case Keyword.get(opts, :config) do
+      nil ->
+        {nil, opts}
+
+      path ->
+        case Burrow.Config.load(path) do
+          {:ok, config} ->
+            {config, opts}
+
+          {:error, reason} ->
+            IO.puts("Error: Failed to load config from #{path}: #{inspect(reason)}")
+            System.halt(1)
+        end
+    end
   end
 end
