@@ -61,20 +61,23 @@ Burrow.Server.start_link(
 ```
 
 ### Rate Limiting
-**Status:** 📋 Planned
+**Status:** ✅ Completed
 
 Per-client connection and bandwidth limits to prevent relay abuse.
 
 ```elixir
-Burrow.Server.start_link(
-  port: 4000,
-  token: "secret",
-  rate_limit: [
-    max_connections_per_client: 10,
-    max_tunnels_per_client: 5,
-    max_bandwidth_mbps: 100
-  ]
-)
+# Enable via application config
+config :burrow, :rate_limit,
+  enabled: true,
+  max_connections_per_minute: 10,
+  max_tunnels_per_client: 5,
+  max_bandwidth_mbps: 100
+
+# API functions
+Burrow.RateLimiter.check_connection(ip)     # :ok | {:error, :rate_limited}
+Burrow.RateLimiter.check_tunnel(client_id)  # :ok | {:error, :max_tunnels}
+Burrow.RateLimiter.check_bandwidth(id, bytes) # :ok | {:error, :bandwidth_exceeded}
+Burrow.RateLimiter.stats()                  # Get current stats
 ```
 
 ### IP Allowlisting

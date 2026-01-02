@@ -12,6 +12,9 @@ defmodule Burrow.Application do
       # DynamicSupervisor for tunnel processes
       {DynamicSupervisor, strategy: :one_for_one, name: Burrow.TunnelSupervisor},
 
+      # Rate limiter (starts but only active when enabled in config)
+      Burrow.RateLimiter,
+
       # Metrics collector
       Burrow.Metrics
     ]

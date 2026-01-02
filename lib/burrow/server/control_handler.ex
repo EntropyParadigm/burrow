@@ -10,14 +10,27 @@ defmodule Burrow.Server.ControlHandler do
 
   @impl ThousandIsland.Handler
   def handle_connection(socket, state) do
-    {:continue, Map.merge(state, %{
-      socket: socket,
-      buffer: <<>>,
-      authenticated: false,
-      client_id: nil,
-      next_connection_id: 1,
-      remote_connections: %{}
-    })}
+    # Get client IP for rate limiting
+    client_ip = get_client_ip(socket)
+
+    # Check rate limit before allowing connection
+    case Burrow.RateLimiter.check_connection(client_ip) do
+      :ok ->
+        Burrow.RateLimiter.record_connection(client_ip)
+        {:continue, Map.merge(state, %{
+          socket: socket,
+          buffer: <<>>,
+          authenticated: false,
+          client_id: nil,
+          client_ip: client_ip,
+          next_connection_id: 1,
+          remote_connections: %{}
+        })}
+
+      {:error, :rate_limited} ->
+        Logger.warning("[ControlHandler] Connection rejected (rate limited): #{client_ip}")
+        {:close, :rate_limited}
+    end
   end
 
   @impl ThousandIsland.Handler
@@ -30,6 +43,7 @@ defmodule Burrow.Server.ControlHandler do
   def handle_close(_socket, state) do
     if state.client_id do
       Burrow.Server.client_disconnected(state.client_id)
+      Burrow.RateLimiter.clear_client(state.client_id)
     end
 
     :ok
@@ -39,6 +53,7 @@ defmodule Burrow.Server.ControlHandler do
   def handle_shutdown(_socket, state) do
     if state.client_id do
       Burrow.Server.client_disconnected(state.client_id)
+      Burrow.RateLimiter.clear_client(state.client_id)
     end
 
     :ok
@@ -111,14 +126,24 @@ defmodule Burrow.Server.ControlHandler do
     if state.authenticated do
       %{tunnel_id: tunnel_id, name: name, remote_port: remote_port, protocol: protocol} = payload
 
-      case Burrow.Server.register_tunnel(state.client_id, tunnel_id, remote_port, name, protocol) do
-        {:ok, actual_port} ->
-          frame = Protocol.encode_tunnel_ok(tunnel_id, actual_port)
-          ThousandIsland.Socket.send(socket, frame)
-          {:ok, state}
+      # Check rate limit for tunnels
+      case Burrow.RateLimiter.check_tunnel(state.client_id) do
+        :ok ->
+          case Burrow.Server.register_tunnel(state.client_id, tunnel_id, remote_port, name, protocol) do
+            {:ok, actual_port} ->
+              Burrow.RateLimiter.record_tunnel(state.client_id)
+              frame = Protocol.encode_tunnel_ok(tunnel_id, actual_port)
+              ThousandIsland.Socket.send(socket, frame)
+              {:ok, state}
 
-        {:error, reason} ->
-          frame = Protocol.encode_tunnel_fail(tunnel_id, to_string(reason))
+            {:error, reason} ->
+              frame = Protocol.encode_tunnel_fail(tunnel_id, to_string(reason))
+              ThousandIsland.Socket.send(socket, frame)
+              {:ok, state}
+          end
+
+        {:error, :max_tunnels} ->
+          frame = Protocol.encode_tunnel_fail(tunnel_id, "max_tunnels_exceeded")
           ThousandIsland.Socket.send(socket, frame)
           {:ok, state}
       end
@@ -195,4 +220,15 @@ defmodule Burrow.Server.ControlHandler do
   defp generate_client_id do
     :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
   end
+
+  defp get_client_ip(socket) do
+    case ThousandIsland.Socket.peername(socket) do
+      {:ok, {ip, _port}} -> format_ip(ip)
+      _ -> "unknown"
+    end
+  end
+
+  defp format_ip({a, b, c, d}), do: "#{a}.#{b}.#{c}.#{d}"
+  defp format_ip({a, b, c, d, e, f, g, h}), do: "#{a}:#{b}:#{c}:#{d}:#{e}:#{f}:#{g}:#{h}"
+  defp format_ip(ip), do: inspect(ip)
 end
