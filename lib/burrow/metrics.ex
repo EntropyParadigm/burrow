@@ -125,36 +125,37 @@ defmodule Burrow.Metrics do
     :telemetry.attach_many(
       "burrow-metrics",
       events,
-      &handle_event/4,
+      &__MODULE__.handle_telemetry_event/4,
       nil
     )
   end
 
-  defp handle_event([:burrow, :client, :connected], _measurements, _metadata, _config) do
+  @doc false
+  def handle_telemetry_event([:burrow, :client, :connected], _measurements, _metadata, _config) do
     GenServer.cast(__MODULE__, {:client_connected})
   end
 
-  defp handle_event([:burrow, :client, :disconnected], _measurements, _metadata, _config) do
+  def handle_telemetry_event([:burrow, :client, :disconnected], _measurements, _metadata, _config) do
     GenServer.cast(__MODULE__, {:client_disconnected})
   end
 
-  defp handle_event([:burrow, :client, :tunnel_opened], _measurements, _metadata, _config) do
+  def handle_telemetry_event([:burrow, :client, :tunnel_opened], _measurements, _metadata, _config) do
     GenServer.cast(__MODULE__, {:tunnel_opened})
   end
 
-  defp handle_event([:burrow, :client, :bytes_received], _measurements, %{bytes: bytes}, _config) do
+  def handle_telemetry_event([:burrow, :client, :bytes_received], _measurements, %{bytes: bytes}, _config) do
     GenServer.cast(__MODULE__, {:bytes_in, bytes})
   end
 
-  defp handle_event([:burrow, :server, :client_connected], _measurements, _metadata, _config) do
+  def handle_telemetry_event([:burrow, :server, :client_connected], _measurements, _metadata, _config) do
     GenServer.cast(__MODULE__, {:client_connected})
   end
 
-  defp handle_event([:burrow, :server, :client_disconnected], _measurements, _metadata, _config) do
+  def handle_telemetry_event([:burrow, :server, :client_disconnected], _measurements, _metadata, _config) do
     GenServer.cast(__MODULE__, {:client_disconnected})
   end
 
-  defp handle_event(_event, _measurements, _metadata, _config) do
+  def handle_telemetry_event(_event, _measurements, _metadata, _config) do
     :ok
   end
 end
