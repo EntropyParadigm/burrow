@@ -56,7 +56,13 @@ defmodule Burrow.MixProject do
       {:argon2_elixir, "~> 4.0"},
 
       # Documentation
-      {:ex_doc, "~> 0.31", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.31", only: :dev, runtime: false},
+
+      # Noise Protocol encryption (pure Elixir)
+      {:decibel, "~> 0.2.4"},
+
+      # File watching for hot reload
+      {:file_system, "~> 1.0"}
     ]
   end
 

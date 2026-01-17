@@ -262,19 +262,60 @@ Burrow.Server.metrics(server)
 
 Burrow supports multiple encryption modes:
 
-### Noise Protocol (Default, Recommended)
+### Noise Protocol (Recommended)
 
-Uses the Noise Protocol Framework (same as WireGuard) for fast, secure encryption:
+Uses the Noise Protocol Framework (Noise_IK pattern, same as WireGuard) for fast, secure encryption:
+
+```bash
+# Generate server keypair
+./burrow keygen --output server.key
+
+# Start server with Noise encryption
+./burrow server --port 4000 --token secret \
+  --encryption noise --noise-keyfile server.key
+
+# The server will print its public key, use it for clients:
+# Noise public key: <base64_public_key>
+
+# Connect client with Noise encryption
+./burrow client --server your-vps.com:4000 --token secret \
+  --encryption noise --noise-pubkey <base64_public_key> \
+  --tunnel web:8080:80
+```
+
+Or programmatically:
 
 ```elixir
-config :burrow, encryption: :noise
+# Generate and save keypair
+{:ok, keypair} = Burrow.Noise.generate_keypair()
+Burrow.Noise.Keys.save(keypair, "server.key")
+
+# Get public key to share with clients
+pubkey = Burrow.Noise.Keys.public_key_base64(keypair)
+
+# Server with Noise
+Burrow.Server.start_link(
+  port: 4000,
+  token: "secret",
+  encryption: :noise,
+  noise_keypair: keypair
+)
+
+# Client with Noise
+Burrow.Client.start_link(
+  server: "your-vps.com:4000",
+  token: "secret",
+  encryption: :noise,
+  noise_server_pubkey: pubkey,
+  tunnels: [[local: 8080, remote: 80]]
+)
 ```
 
 Features:
-- Forward secrecy
-- Mutual authentication
-- Low latency (1-RTT handshake)
-- Modern cryptography (Curve25519, ChaCha20-Poly1305)
+- Forward secrecy with ephemeral keys
+- 1-RTT handshake (low latency)
+- Modern cryptography (X25519, ChaCha20-Poly1305, SHA256)
+- Client knows server identity beforehand (prevents MITM)
 
 ### TLS
 
@@ -295,6 +336,77 @@ For testing on trusted networks:
 config :burrow, encryption: :none
 ```
 
+## UDP Tunneling
+
+Burrow supports UDP tunnels alongside TCP. UDP tunnels use session-based multiplexing where each unique source address (IP + port) gets a virtual connection ID.
+
+```bash
+# Tunnel UDP traffic (e.g., DNS, game servers, voice)
+./burrow client --server your-vps.com:4000 --token secret \
+  --tunnel dns:5353:53:udp \
+  --tunnel voice:9987:9987:udp
+```
+
+Or in config:
+
+```toml
+[[tunnels]]
+name = "dns"
+local = 5353
+remote = 53
+protocol = "udp"
+
+[[tunnels]]
+name = "gameserver"
+local = 27015
+remote = 27015
+protocol = "udp"
+```
+
+UDP sessions automatically expire after 60 seconds of inactivity.
+
+## Hot Reload
+
+Burrow supports runtime configuration updates without restarting:
+
+```bash
+# Start server with config file
+./burrow server --config /etc/burrow/server.toml
+
+# Trigger reload via signal
+kill -HUP $(pgrep -f "burrow server")
+
+# Or via CLI
+./burrow reload
+```
+
+### What Can Be Hot-Reloaded
+
+| Setting | Safe to Reload |
+|---------|----------------|
+| IP filter rules | Yes |
+| Rate limit config | Yes |
+| Max connections | Yes |
+| Port binding | No (requires restart) |
+| Token/auth | No (breaks connections) |
+| TLS certificates | No (requires restart) |
+
+### Programmatic Reload
+
+```elixir
+# Subscribe to config changes
+Burrow.ConfigManager.subscribe()
+
+# Trigger reload
+{:ok, changes} = Burrow.ConfigManager.reload()
+
+# Update specific settings
+Burrow.ConfigManager.update_config(:rate_limit, %{
+  enabled: true,
+  max_connections_per_minute: 20
+})
+```
+
 ## CLI Reference
 
 ### Server Commands
@@ -303,14 +415,15 @@ config :burrow, encryption: :none
 # Start server
 ./burrow server --port 4000 --token secret
 
+# With Noise encryption
+./burrow server --port 4000 --token secret \
+  --encryption noise --noise-keyfile server.key
+
 # With config file
 ./burrow server --config server.toml
 
 # Daemonize
 ./burrow server --port 4000 --token secret --daemon
-
-# Show connected clients
-./burrow server status --port 4000
 ```
 
 ### Client Commands
@@ -323,14 +436,39 @@ config :burrow, encryption: :none
   --tunnel web:8080:80 \
   --tunnel ssh:22:2222
 
+# With Noise encryption
+./burrow client \
+  --server your-vps.com:4000 \
+  --token secret \
+  --encryption noise \
+  --noise-pubkey <base64_key> \
+  --tunnel web:8080:80
+
 # With config file
 ./burrow client --config burrow.toml
 
 # Daemonize
 ./burrow client --config burrow.toml --daemon
+```
 
-# Show status
-./burrow client status
+### Key Management
+
+```bash
+# Generate Noise keypair
+./burrow keygen --output server.key
+
+# Generate and hash authentication token
+./burrow generate-token
+
+# Hash an existing token
+./burrow hash-token mysecrettoken
+```
+
+### Hot Reload
+
+```bash
+# Trigger config reload on running server
+./burrow reload
 ```
 
 ### Common Options
@@ -338,9 +476,9 @@ config :burrow, encryption: :none
 ```bash
 --verbose, -v       Verbose output
 --quiet, -q         Suppress output
---log-level LEVEL   Set log level (debug, info, warn, error)
 --config FILE       Load config from file
 --daemon, -d        Run in background
+--encryption MODE   Encryption: noise, tls, none
 ```
 
 ## Telemetry & Metrics
@@ -486,8 +624,9 @@ mix docs
 - [x] Multi-tunnel support
 - [x] Auto-reconnection
 - [x] CLI interface
-- [ ] Noise protocol encryption
-- [ ] UDP tunneling
+- [x] Noise protocol encryption
+- [x] UDP tunneling
+- [x] Hot reload configuration
 - [ ] Web dashboard
 - [ ] Public relay server (burrow.pub)
 - [ ] Prometheus metrics exporter

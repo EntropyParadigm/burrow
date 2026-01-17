@@ -58,10 +58,17 @@ defmodule Burrow.Client do
     :connected_at,
     :next_tunnel_id,
     :next_connection_id,
-    :local_connections,
+    :local_connections,       # TCP: {tunnel_id, conn_id} => socket
+    :udp_sockets,             # UDP: tunnel_id => socket
+    :udp_sessions,            # UDP: {tunnel_id, conn_id} => {ip, port}
     :tls,
     :tls_opts,
-    :transport
+    :transport,
+    # Noise encryption fields
+    :encryption,           # :none, :noise, or :tls
+    :noise_keypair,        # Client's static keypair
+    :noise_server_pubkey,  # Server's public key (base64 or binary)
+    :noise_transport       # Burrow.Noise.Transport after handshake
   ]
 
   # Client API
@@ -117,6 +124,13 @@ defmodule Burrow.Client do
     tls = Keyword.get(opts, :tls, false)
     tls_opts = build_tls_opts(opts)
 
+    # Encryption mode: :none, :noise, or :tls
+    encryption = Keyword.get(opts, :encryption, if(tls, do: :tls, else: :none))
+
+    # Noise configuration
+    noise_keypair = Keyword.get(opts, :noise_keypair) || generate_ephemeral_keypair(encryption)
+    noise_server_pubkey = parse_noise_pubkey(Keyword.get(opts, :noise_server_pubkey))
+
     state = %__MODULE__{
       host: host,
       port: port,
@@ -139,9 +153,15 @@ defmodule Burrow.Client do
       next_tunnel_id: 1,
       next_connection_id: 1,
       local_connections: %{},
+      udp_sockets: %{},
+      udp_sessions: %{},
       tls: tls,
       tls_opts: tls_opts,
-      transport: if(tls, do: :ssl, else: :gen_tcp)
+      transport: if(tls, do: :ssl, else: :gen_tcp),
+      encryption: encryption,
+      noise_keypair: noise_keypair,
+      noise_server_pubkey: noise_server_pubkey,
+      noise_transport: nil
     }
 
     # Connect immediately
@@ -334,11 +354,6 @@ defmodule Burrow.Client do
     {:noreply, state}
   end
 
-  # Write directly to file for debugging
-  defp log_to_file(msg) do
-    File.write!("/tmp/burrow_client_debug.log", "#{msg}\n", [:append])
-  end
-
   # Handle data from local service connections
   @impl true
   def handle_info({:tcp, local_socket, data}, state) do
@@ -379,6 +394,27 @@ defmodule Burrow.Client do
     end
   end
 
+  # Handle UDP responses from local services
+  @impl true
+  def handle_info({:udp, socket, _ip, _port, data}, state) do
+    log_to_file("[Client] Received UDP response: #{byte_size(data)} bytes")
+
+    # Find which tunnel this UDP socket belongs to
+    case find_tunnel_for_udp_socket(state, socket) do
+      {tunnel_id, connection_id} ->
+        log_to_file("[Client] UDP response for tunnel=#{tunnel_id}, conn=#{connection_id}")
+        frame = Protocol.encode_data(tunnel_id, connection_id, data)
+        if state.socket do
+          send_data(state.transport, state.socket, frame)
+        end
+        {:noreply, state}
+
+      nil ->
+        log_to_file("[Client] Could not find tunnel for UDP socket")
+        {:noreply, state}
+    end
+  end
+
   @impl true
   def handle_info(_msg, state) do
     {:noreply, state}
@@ -388,7 +424,8 @@ defmodule Burrow.Client do
 
   defp do_connect(state) do
     host = String.to_charlist(state.host)
-    base_opts = [:binary, {:active, true}, {:packet, :raw}]
+    # Use passive mode initially for Noise handshake
+    base_opts = [:binary, {:active, false}, {:packet, :raw}]
 
     connect_result =
       if state.tls do
@@ -403,21 +440,35 @@ defmodule Burrow.Client do
     case connect_result do
       {:ok, socket} ->
         transport = state.transport
-        Logger.info("[Burrow.Client] Connected to #{state.host}:#{state.port}#{if state.tls, do: " (TLS)", else: ""}")
+        encryption_info = encryption_label(state.encryption, state.tls)
+        Logger.info("[Burrow.Client] Connected to #{state.host}:#{state.port}#{encryption_info}")
 
-        # Send authentication
-        frame = Protocol.encode_auth(state.token)
-        send_data(transport, socket, frame)
+        # Perform Noise handshake if enabled
+        case maybe_noise_handshake(socket, state) do
+          {:ok, noise_transport} ->
+            # Switch to active mode after handshake
+            set_socket_active(transport, socket, true)
 
-        # Start heartbeat
-        ref = Process.send_after(self(), :heartbeat, state.heartbeat_interval)
+            # Send authentication (encrypted if Noise is active)
+            frame = Protocol.encode_auth(state.token)
+            send_frame(state, socket, noise_transport, frame)
 
-        {:ok, %{state |
-          socket: socket,
-          heartbeat_ref: ref,
-          buffer: <<>>,
-          connected_at: DateTime.utc_now()
-        }}
+            # Start heartbeat
+            ref = Process.send_after(self(), :heartbeat, state.heartbeat_interval)
+
+            {:ok, %{state |
+              socket: socket,
+              noise_transport: noise_transport,
+              heartbeat_ref: ref,
+              buffer: <<>>,
+              connected_at: DateTime.utc_now()
+            }}
+
+          {:error, reason} ->
+            Logger.error("[Burrow.Client] Noise handshake failed: #{inspect(reason)}")
+            close_socket(transport, socket)
+            {:error, {:noise_handshake_failed, reason}}
+        end
 
       {:error, reason} ->
         {:error, reason}
@@ -457,9 +508,31 @@ defmodule Burrow.Client do
   end
 
   defp process_data(state, data) do
-    buffer = state.buffer <> data
-    process_frames(state, buffer)
+    # Decrypt data if Noise is enabled
+    case decrypt_incoming(state, data) do
+      {:ok, decrypted_data, new_state} ->
+        buffer = new_state.buffer <> decrypted_data
+        process_frames(new_state, buffer)
+
+      {:error, reason} ->
+        Logger.error("[Burrow.Client] Decryption failed: #{inspect(reason)}")
+        state
+    end
   end
+
+  defp decrypt_incoming(%{encryption: :noise, noise_transport: transport} = state, data)
+       when not is_nil(transport) do
+    case Burrow.Noise.Transport.process_data(transport, data) do
+      {:ok, messages, new_transport} ->
+        decrypted = Enum.join(messages)
+        {:ok, decrypted, %{state | noise_transport: new_transport}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp decrypt_incoming(state, data), do: {:ok, data, state}
 
   defp process_frames(state, buffer) do
     case Protocol.decode(buffer) do
@@ -528,40 +601,84 @@ defmodule Burrow.Client do
 
   defp handle_frame(state, :data, %{tunnel_id: tid, connection_id: cid, data: data}) do
     log_to_file("[Client] Received data frame: tunnel=#{tid}, conn=#{cid}, #{byte_size(data)} bytes")
+
+    case Map.get(state.tunnels, tid) do
+      nil ->
+        log_to_file("[Client] ERROR: Tunnel #{tid} not found!")
+        state
+
+      %{protocol: :udp} = tunnel ->
+        # UDP tunnel - use datagram sockets
+        handle_udp_data(state, tunnel, tid, cid, data)
+
+      tunnel ->
+        # TCP tunnel - use stream sockets
+        handle_tcp_data(state, tunnel, tid, cid, data)
+    end
+  end
+
+  # Handle TCP data (existing logic)
+  defp handle_tcp_data(state, tunnel, tid, cid, data) do
     case Map.get(state.local_connections, {tid, cid}) do
       nil ->
-        # New connection - open local socket (always plain TCP for local)
-        log_to_file("[Client] New connection, opening local socket")
-        case Map.get(state.tunnels, tid) do
-          nil ->
-            log_to_file("[Client] ERROR: Tunnel #{tid} not found!")
+        # New connection - open local TCP socket
+        log_to_file("[Client] New TCP connection, connecting to 127.0.0.1:#{tunnel.local}")
+        case :gen_tcp.connect(~c"127.0.0.1", tunnel.local, [:binary, active: true], 5000) do
+          {:ok, local_socket} ->
+            log_to_file("[Client] Connected! Sending #{byte_size(data)} bytes to local service")
+            :gen_tcp.send(local_socket, data)
+            new_connections = Map.put(state.local_connections, {tid, cid}, local_socket)
+            %{state | local_connections: new_connections}
+
+          {:error, reason} ->
+            log_to_file("[Client] ERROR: Failed to connect locally: #{inspect(reason)}")
+            frame = Protocol.encode_close(tid, cid)
+            send_data(state.transport, state.socket, frame)
             state
-
-          tunnel ->
-            log_to_file("[Client] Connecting to 127.0.0.1:#{tunnel.local}")
-            case :gen_tcp.connect(~c"127.0.0.1", tunnel.local, [:binary, active: true], 5000) do
-              {:ok, local_socket} ->
-                log_to_file("[Client] Connected! Sending #{byte_size(data)} bytes to local service")
-                :gen_tcp.send(local_socket, data)
-                new_connections = Map.put(state.local_connections, {tid, cid}, local_socket)
-                log_to_file("[Client] Stored connection: {#{tid}, #{cid}} -> #{inspect(local_socket)}")
-                %{state | local_connections: new_connections}
-
-              {:error, reason} ->
-                log_to_file("[Client] ERROR: Failed to connect locally: #{inspect(reason)}")
-                # Send close back to server
-                frame = Protocol.encode_close(tid, cid)
-                send_data(state.transport, state.socket, frame)
-                state
-            end
         end
 
       local_socket ->
-        # Local connections are always plain TCP
-        log_to_file("[Client] Existing connection, forwarding #{byte_size(data)} bytes")
+        log_to_file("[Client] Existing TCP connection, forwarding #{byte_size(data)} bytes")
         :gen_tcp.send(local_socket, data)
         emit_telemetry(:bytes_received, %{tunnel_id: tid, bytes: byte_size(data)})
         state
+    end
+  end
+
+  # Handle UDP data - datagrams
+  defp handle_udp_data(state, tunnel, tid, cid, data) do
+    # Get or create UDP socket for this tunnel
+    {socket, state} = get_or_create_udp_socket(state, tid, tunnel.local)
+
+    # Send datagram to local UDP service
+    case :gen_udp.send(socket, ~c"127.0.0.1", tunnel.local, data) do
+      :ok ->
+        log_to_file("[Client] Sent UDP datagram to 127.0.0.1:#{tunnel.local}")
+        # Store the connection ID for response routing
+        new_sessions = Map.put(state.udp_sessions, {tid, cid}, {tid, cid})
+        emit_telemetry(:bytes_received, %{tunnel_id: tid, bytes: byte_size(data), protocol: :udp})
+        %{state | udp_sessions: new_sessions}
+
+      {:error, reason} ->
+        log_to_file("[Client] ERROR: Failed to send UDP: #{inspect(reason)}")
+        frame = Protocol.encode_close(tid, cid)
+        send_data(state.transport, state.socket, frame)
+        state
+    end
+  end
+
+  defp get_or_create_udp_socket(state, tunnel_id, _local_port) do
+    case Map.get(state.udp_sockets, tunnel_id) do
+      nil ->
+        # Create new UDP socket for this tunnel
+        # Use port 0 to let OS assign an ephemeral port
+        {:ok, socket} = :gen_udp.open(0, [:binary, {:active, true}])
+        log_to_file("[Client] Created UDP socket for tunnel #{tunnel_id}")
+        new_sockets = Map.put(state.udp_sockets, tunnel_id, socket)
+        {socket, %{state | udp_sockets: new_sockets}}
+
+      socket ->
+        {socket, state}
     end
   end
 
@@ -629,6 +746,22 @@ defmodule Burrow.Client do
     end)
   end
 
+  defp find_tunnel_for_udp_socket(state, socket) do
+    # Find the tunnel_id for this UDP socket
+    case Enum.find(state.udp_sockets, fn {_tid, sock} -> sock == socket end) do
+      {tunnel_id, _socket} ->
+        # Find the most recent connection_id for this tunnel
+        # For UDP, we use a single socket per tunnel, so we need to track sessions
+        case Enum.find(state.udp_sessions, fn {{tid, _cid}, _} -> tid == tunnel_id end) do
+          {{tid, cid}, _} -> {tid, cid}
+          nil -> {tunnel_id, 0}  # Default connection ID if no session found
+        end
+
+      nil ->
+        nil
+    end
+  end
+
   defp calculate_uptime(nil), do: 0
   defp calculate_uptime(connected_at) do
     DateTime.diff(DateTime.utc_now(), connected_at, :second)
@@ -677,5 +810,77 @@ defmodule Burrow.Client do
     # Add 0-25% jitter to prevent thundering herd
     jitter = :rand.uniform(div(doubled, 4))
     doubled + jitter
+  end
+
+  # Write directly to file for debugging
+  defp log_to_file(msg) do
+    File.write!("/tmp/burrow_client_debug.log", "#{msg}\n", [:append])
+  end
+
+  # Noise encryption helpers
+
+  defp generate_ephemeral_keypair(:noise) do
+    {:ok, keypair} = Burrow.Noise.Keys.generate()
+    keypair
+  end
+
+  defp generate_ephemeral_keypair(_), do: nil
+
+  defp parse_noise_pubkey(nil), do: nil
+  defp parse_noise_pubkey(key) when is_binary(key) and byte_size(key) == 32, do: key
+  defp parse_noise_pubkey(base64) when is_binary(base64) do
+    case Base.decode64(base64) do
+      {:ok, key} when byte_size(key) == 32 -> key
+      _ -> nil
+    end
+  end
+
+  defp maybe_noise_handshake(_socket, %{encryption: encryption}) when encryption != :noise do
+    {:ok, nil}
+  end
+
+  defp maybe_noise_handshake(socket, %{encryption: :noise} = state) do
+    case state.noise_server_pubkey do
+      nil ->
+        {:error, :missing_server_pubkey}
+
+      server_pubkey ->
+        Logger.info("[Burrow.Client] Performing Noise handshake...")
+        Burrow.Noise.client_handshake(socket, state.noise_keypair, server_pubkey)
+    end
+  end
+
+  defp encryption_label(:noise, _), do: " (Noise)"
+  defp encryption_label(:tls, _), do: " (TLS)"
+  defp encryption_label(_, true), do: " (TLS)"
+  defp encryption_label(_, _), do: ""
+
+  defp set_socket_active(:ssl, socket, active) do
+    :ssl.setopts(socket, active: active)
+  end
+
+  defp set_socket_active(:gen_tcp, socket, active) do
+    :inet.setopts(socket, active: active)
+  end
+
+  defp set_socket_active(nil, socket, active) do
+    :inet.setopts(socket, active: active)
+  end
+
+  # Send a protocol frame, encrypting with Noise if available
+  defp send_frame(%{encryption: :noise}, _socket, noise_transport, frame) when not is_nil(noise_transport) do
+    case Burrow.Noise.Transport.encrypt(noise_transport, frame) do
+      {:ok, encrypted, _new_transport} ->
+        raw_socket = Burrow.Noise.Transport.socket(noise_transport)
+        :gen_tcp.send(raw_socket, encrypted)
+
+      {:error, reason} ->
+        Logger.error("[Burrow.Client] Encryption failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp send_frame(state, socket, _noise_transport, frame) do
+    send_data(state.transport, socket, frame)
   end
 end

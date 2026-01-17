@@ -163,6 +163,16 @@ defmodule Burrow.RateLimiter do
     Map.get(config, :enabled, false)
   end
 
+  @doc """
+  Update rate limiter configuration at runtime.
+
+  This allows hot-reloading of rate limit settings without restart.
+  """
+  @spec update_config(map()) :: :ok
+  def update_config(new_config) when is_map(new_config) do
+    GenServer.call(__MODULE__, {:update_config, new_config})
+  end
+
   # Server callbacks
 
   @impl true
@@ -238,6 +248,29 @@ defmodule Burrow.RateLimiter do
     }
 
     {:reply, stats, state}
+  end
+
+  @impl true
+  def handle_call({:update_config, new_config}, _from, state) do
+    require Logger
+
+    # Merge new config with defaults
+    updated_config = Map.merge(@default_config, Enum.into(new_config, %{}))
+
+    # Update application env
+    Application.put_env(:burrow, :rate_limit, updated_config)
+
+    # Log the change
+    Logger.info("[RateLimiter] Configuration updated: enabled=#{updated_config.enabled}, " <>
+      "max_connections=#{updated_config.max_connections_per_minute}, " <>
+      "max_tunnels=#{updated_config.max_tunnels_per_client}")
+
+    # If enabling rate limiting and not already running cleanup, start it
+    if updated_config.enabled and not state.config.enabled do
+      schedule_cleanup(updated_config.cleanup_interval_ms)
+    end
+
+    {:reply, :ok, %{state | config: updated_config}}
   end
 
   @impl true

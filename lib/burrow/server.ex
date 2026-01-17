@@ -56,7 +56,10 @@ defmodule Burrow.Server do
     :tls,
     :tls_opts,
     :draining,
-    :drain_start
+    :drain_start,
+    # Noise encryption fields
+    :encryption,      # :none, :noise, or :tls
+    :noise_keypair    # Server's static keypair for Noise
   ]
 
   # Client API
@@ -159,6 +162,15 @@ defmodule Burrow.Server do
     tls_opts = Keyword.get(opts, :tls)
     tls_enabled = tls_opts != nil
 
+    # Encryption mode: :none, :noise, or :tls
+    encryption = Keyword.get(opts, :encryption, if(tls_enabled, do: :tls, else: :none))
+    noise_keypair = Keyword.get(opts, :noise_keypair)
+
+    # Validate Noise configuration
+    if encryption == :noise and is_nil(noise_keypair) do
+      raise ArgumentError, ":noise_keypair is required when encryption is :noise"
+    end
+
     state = %__MODULE__{
       port: port,
       token: token,
@@ -173,20 +185,27 @@ defmodule Burrow.Server do
       tls: tls_enabled,
       tls_opts: tls_opts,
       draining: false,
-      drain_start: nil
+      drain_start: nil,
+      encryption: encryption,
+      noise_keypair: noise_keypair
     }
 
     # Start the control connection listener
-    case start_control_listener(port, tls_opts) do
+    case start_control_listener(port, tls_opts, encryption, noise_keypair) do
       {:ok, listener} ->
-        tls_info = if tls_enabled, do: " (TLS)", else: ""
-        Logger.info("[Burrow.Server] Listening on port #{port}#{tls_info}")
+        encryption_info = encryption_label(encryption, tls_enabled)
+        Logger.info("[Burrow.Server] Listening on port #{port}#{encryption_info}")
         {:ok, %{state | listener: listener}}
 
       {:error, reason} ->
         {:stop, reason}
     end
   end
+
+  defp encryption_label(:noise, _), do: " (Noise)"
+  defp encryption_label(:tls, _), do: " (TLS)"
+  defp encryption_label(_, true), do: " (TLS)"
+  defp encryption_label(_, _), do: ""
 
   @impl true
   def handle_call(:list_clients, _from, state) do
@@ -274,8 +293,14 @@ defmodule Burrow.Server do
     if state.draining do
       {:reply, {:error, :server_draining}, state}
     else
+      # Get control handler PID for this client (needed for UDP listeners)
+      control_pid = case Map.get(state.clients, client_id) do
+        %{pid: pid} -> pid
+        nil -> nil
+      end
+
       # Try to bind to the requested port
-      case start_public_listener(requested_port, client_id, tunnel_id) do
+      case start_public_listener(requested_port, client_id, tunnel_id, protocol, control_pid) do
         {:ok, listener, actual_port} ->
           tunnel_info = %{
             id: tunnel_id,
@@ -289,10 +314,12 @@ defmodule Burrow.Server do
           new_listeners = Map.put(state.public_listeners, actual_port, %{
             listener: listener,
             client_id: client_id,
-            tunnel_id: tunnel_id
+            tunnel_id: tunnel_id,
+            protocol: protocol
           })
 
-          Logger.info("[Burrow.Server] Tunnel '#{name}' opened on port #{actual_port} for client #{client_id}")
+          proto_str = if protocol == :udp, do: " (UDP)", else: ""
+          Logger.info("[Burrow.Server] Tunnel '#{name}' opened on port #{actual_port}#{proto_str} for client #{client_id}")
 
           {:reply, {:ok, actual_port}, %{state | tunnels: new_tunnels, public_listeners: new_listeners}}
 
@@ -424,7 +451,16 @@ defmodule Burrow.Server do
 
   # Private functions
 
-  defp start_control_listener(port, nil) do
+  defp start_control_listener(port, _tls_opts, :noise, noise_keypair) do
+    # Noise encryption
+    ThousandIsland.start_link(
+      port: port,
+      handler_module: Burrow.Server.NoiseHandler,
+      handler_options: [noise_keypair: noise_keypair]
+    )
+  end
+
+  defp start_control_listener(port, nil, _encryption, _noise_keypair) do
     # Plain TCP
     ThousandIsland.start_link(
       port: port,
@@ -433,7 +469,7 @@ defmodule Burrow.Server do
     )
   end
 
-  defp start_control_listener(port, tls_opts) when is_list(tls_opts) do
+  defp start_control_listener(port, tls_opts, _encryption, _noise_keypair) when is_list(tls_opts) do
     # TLS enabled
     transport_opts = build_transport_opts(tls_opts)
 
@@ -465,8 +501,26 @@ defmodule Burrow.Server do
     Keyword.put(base_opts, :verify, verify)
   end
 
-  defp start_public_listener(requested_port, client_id, tunnel_id) do
-    # Try requested port, or find an available one
+  defp start_public_listener(requested_port, client_id, tunnel_id, :udp, control_pid) do
+    # UDP listener - use our custom GenServer
+    port = if requested_port > 0, do: requested_port, else: find_available_udp_port()
+
+    case Burrow.Server.UDPListener.start_link(
+      port: port,
+      tunnel_id: tunnel_id,
+      control_pid: control_pid,
+      client_id: client_id
+    ) do
+      {:ok, pid} ->
+        {:ok, pid, port}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp start_public_listener(requested_port, client_id, tunnel_id, _protocol, _control_pid) do
+    # TCP listener - use ThousandIsland
     port = if requested_port > 0, do: requested_port, else: find_available_port()
 
     case ThousandIsland.start_link(
@@ -490,6 +544,14 @@ defmodule Burrow.Server do
     port
   end
 
+  defp find_available_udp_port do
+    # Let the OS assign a UDP port
+    {:ok, socket} = :gen_udp.open(0, [:binary])
+    {:ok, port} = :inet.port(socket)
+    :gen_udp.close(socket)
+    port
+  end
+
   defp cleanup_client(state, client_id) do
     if state.on_disconnect do
       state.on_disconnect.(%{id: client_id}, :disconnected)
@@ -498,11 +560,11 @@ defmodule Burrow.Server do
     emit_telemetry(:client_disconnected, %{client_id: client_id})
     Logger.info("[Burrow.Server] Client #{client_id} disconnected")
 
-    # Stop all public listeners for this client
+    # Stop all public listeners for this client (both TCP and UDP)
     state.public_listeners
     |> Enum.filter(fn {_port, info} -> info.client_id == client_id end)
-    |> Enum.each(fn {_port, %{listener: listener}} ->
-      ThousandIsland.stop(listener)
+    |> Enum.each(fn {_port, info} ->
+      stop_listener(info)
     end)
 
     new_listeners = state.public_listeners
@@ -514,6 +576,16 @@ defmodule Burrow.Server do
       tunnels: Map.delete(state.tunnels, client_id),
       public_listeners: new_listeners
     }
+  end
+
+  defp stop_listener(%{listener: listener, protocol: :udp}) do
+    # UDP listener is a GenServer
+    GenServer.stop(listener, :normal)
+  end
+
+  defp stop_listener(%{listener: listener}) do
+    # TCP listener is ThousandIsland
+    ThousandIsland.stop(listener)
   end
 
   defp notify_clients_of_shutdown(clients, reason) do

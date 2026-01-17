@@ -38,7 +38,12 @@ defmodule Burrow.CLI do
         tls_verify: :boolean,
         insecure: :boolean,
         # Token hashing
-        token_hash: :string
+        token_hash: :string,
+        # Noise encryption options
+        encryption: :string,
+        noise_keyfile: :string,
+        noise_pubkey: :string,
+        output: :string
       ],
       aliases: [
         p: :port,
@@ -49,7 +54,8 @@ defmodule Burrow.CLI do
         q: :quiet,
         d: :daemon,
         h: :help,
-        k: :insecure
+        k: :insecure,
+        o: :output
       ]
     )
 
@@ -83,6 +89,14 @@ defmodule Burrow.CLI do
 
   defp run_command(["generate-token" | _], _opts) do
     run_generate_token()
+  end
+
+  defp run_command(["keygen" | _], opts) do
+    run_keygen(opts)
+  end
+
+  defp run_command(["reload" | _], _opts) do
+    run_reload()
   end
 
   defp run_command(["version" | _], _opts) do
@@ -123,11 +137,21 @@ defmodule Burrow.CLI do
 
     # Build TLS options if provided (CLI overrides config)
     tls_opts = build_server_tls_opts(opts) || Keyword.get(server_opts, :tls)
-    tls_info = if tls_opts, do: " (TLS)", else: ""
+
+    # Build Noise options
+    encryption = parse_encryption(Keyword.get(opts, :encryption))
+    noise_keypair = load_noise_keypair(Keyword.get(opts, :noise_keyfile))
+
+    # Determine encryption info for display
+    encryption_info = cond do
+      encryption == :noise -> " (Noise)"
+      tls_opts != nil -> " (TLS)"
+      true -> ""
+    end
     hash_info = if token_hash, do: " (hashed token)", else: ""
     config_info = if file_opts[:config], do: " [config: #{file_opts[:config]}]", else: ""
 
-    IO.puts("Starting Burrow server on port #{port}#{tls_info}#{hash_info}#{config_info}...")
+    IO.puts("Starting Burrow server on port #{port}#{encryption_info}#{hash_info}#{config_info}...")
 
     # Start the application
     {:ok, _} = Application.ensure_all_started(:burrow)
@@ -136,11 +160,17 @@ defmodule Burrow.CLI do
     server_opts = [port: port]
     server_opts = if token_hash, do: Keyword.put(server_opts, :token_hash, token_hash), else: Keyword.put(server_opts, :token, token)
     server_opts = if tls_opts, do: Keyword.put(server_opts, :tls, tls_opts), else: server_opts
+    server_opts = if encryption, do: Keyword.put(server_opts, :encryption, encryption), else: server_opts
+    server_opts = if noise_keypair, do: Keyword.put(server_opts, :noise_keypair, noise_keypair), else: server_opts
 
     # Start the server
     case Burrow.Server.start_link(server_opts) do
       {:ok, _pid} ->
-        IO.puts("Server listening on port #{port}#{tls_info}#{hash_info}")
+        IO.puts("Server listening on port #{port}#{encryption_info}#{hash_info}")
+        if encryption == :noise and noise_keypair do
+          pubkey = Burrow.Noise.Keys.public_key_base64(noise_keypair)
+          IO.puts("Noise public key: #{pubkey}")
+        end
         IO.puts("Press Ctrl+C to stop.")
 
         # Keep running
@@ -177,9 +207,19 @@ defmodule Burrow.CLI do
     # TLS options
     tls_enabled = Keyword.get(opts, :tls, false)
     insecure = Keyword.get(opts, :insecure, false)
-    tls_info = if tls_enabled, do: " (TLS)", else: ""
 
-    IO.puts("Connecting to #{server}#{tls_info}...")
+    # Noise options
+    encryption = parse_encryption(Keyword.get(opts, :encryption))
+    noise_pubkey = Keyword.get(opts, :noise_pubkey)
+
+    # Determine encryption info for display
+    encryption_info = cond do
+      encryption == :noise -> " (Noise)"
+      tls_enabled -> " (TLS)"
+      true -> ""
+    end
+
+    IO.puts("Connecting to #{server}#{encryption_info}...")
 
     # Start the application
     {:ok, _} = Application.ensure_all_started(:burrow)
@@ -188,11 +228,13 @@ defmodule Burrow.CLI do
     connect_opts = [token: token, tunnels: tunnels]
     connect_opts = if tls_enabled, do: Keyword.put(connect_opts, :tls, true), else: connect_opts
     connect_opts = if insecure, do: Keyword.put(connect_opts, :tls_verify, :verify_none), else: connect_opts
+    connect_opts = if encryption, do: Keyword.put(connect_opts, :encryption, encryption), else: connect_opts
+    connect_opts = if noise_pubkey, do: Keyword.put(connect_opts, :noise_server_pubkey, noise_pubkey), else: connect_opts
 
     # Connect
     case Burrow.connect(server, connect_opts) do
       {:ok, _pid} ->
-        IO.puts("Connected#{tls_info}!")
+        IO.puts("Connected#{encryption_info}!")
         Enum.each(tunnels, fn t ->
           IO.puts("  Tunnel '#{t[:name]}': localhost:#{t[:local]} -> remote:#{t[:remote]}")
         end)
@@ -230,6 +272,50 @@ defmodule Burrow.CLI do
     IO.puts("Use the hash in server config for secure token storage.")
   end
 
+  defp run_keygen(opts) do
+    output = Keyword.get(opts, :output, "burrow.key")
+
+    IO.puts("Generating Noise keypair...")
+    {:ok, keypair} = Burrow.Noise.Keys.generate()
+
+    case Burrow.Noise.Keys.save(keypair, output) do
+      :ok ->
+        pubkey = Burrow.Noise.Keys.public_key_base64(keypair)
+        IO.puts("Keypair saved to: #{output}")
+        IO.puts("Public key: #{pubkey}")
+        IO.puts("")
+        IO.puts("Server usage:")
+        IO.puts("  burrow server --port 4000 --token secret --encryption noise --noise-keyfile #{output}")
+        IO.puts("")
+        IO.puts("Client usage:")
+        IO.puts("  burrow client --server host:4000 --token secret --encryption noise --noise-pubkey #{pubkey} --tunnel web:8080:80")
+
+      {:error, reason} ->
+        IO.puts("Error saving keypair: #{inspect(reason)}")
+        System.halt(1)
+    end
+  end
+
+  defp run_reload do
+    IO.puts("Triggering configuration reload...")
+
+    # Try to connect to the running server and trigger reload
+    # This sends SIGHUP to the running Burrow process
+    case System.cmd("pkill", ["-HUP", "-f", "burrow server"], stderr_to_stdout: true) do
+      {_, 0} ->
+        IO.puts("Reload signal sent successfully.")
+        IO.puts("Check server logs for reload status.")
+
+      {output, _code} ->
+        IO.puts("Could not send reload signal.")
+        IO.puts("Make sure a Burrow server is running.")
+        IO.puts("Output: #{output}")
+        IO.puts("")
+        IO.puts("Alternative: Edit config file directly if file watching is enabled.")
+        System.halt(1)
+    end
+  end
+
   defp parse_tunnel(str) do
     case String.split(str, ":") do
       [name, local, remote] ->
@@ -241,6 +327,25 @@ defmodule Burrow.CLI do
       _ ->
         IO.puts("Invalid tunnel format: #{str}")
         IO.puts("Expected: name:local:remote or local:remote")
+        System.halt(1)
+    end
+  end
+
+  defp parse_encryption(nil), do: nil
+  defp parse_encryption("noise"), do: :noise
+  defp parse_encryption("tls"), do: :tls
+  defp parse_encryption("none"), do: :none
+  defp parse_encryption(other) do
+    IO.puts("Warning: Unknown encryption mode '#{other}', using none")
+    :none
+  end
+
+  defp load_noise_keypair(nil), do: nil
+  defp load_noise_keypair(path) do
+    case Burrow.Noise.Keys.load(path) do
+      {:ok, keypair} -> keypair
+      {:error, reason} ->
+        IO.puts("Error loading Noise keypair from #{path}: #{inspect(reason)}")
         System.halt(1)
     end
   end
@@ -287,6 +392,8 @@ defmodule Burrow.CLI do
     COMMANDS:
         server          Start a Burrow server
         client          Connect to a Burrow server
+        keygen          Generate Noise protocol keypair
+        reload          Trigger configuration reload (sends SIGHUP)
         hash-token      Hash a token for secure storage
         generate-token  Generate a new token and hash
         version         Print version information
@@ -301,6 +408,8 @@ defmodule Burrow.CLI do
         --tls-key <FILE>        TLS private key file
         --tls-ca <FILE>         CA certificate for client verification
         --tls-verify            Require client certificate verification
+        --encryption <MODE>     Encryption mode: noise, tls, none
+        --noise-keyfile <FILE>  Noise protocol private key file
 
     CLIENT OPTIONS:
         -s, --server <HOST:PORT>  Server address (required)
@@ -309,6 +418,11 @@ defmodule Burrow.CLI do
         -c, --config <FILE>       Load config from file
         --tls                     Use TLS encryption
         -k, --insecure            Skip TLS certificate verification
+        --encryption <MODE>       Encryption mode: noise, tls, none
+        --noise-pubkey <KEY>      Server's Noise public key (base64)
+
+    KEYGEN OPTIONS:
+        -o, --output <FILE>     Output file (default: burrow.key)
 
     COMMON OPTIONS:
         -v, --verbose     Verbose output
@@ -333,6 +447,18 @@ defmodule Burrow.CLI do
         burrow server --port 4000 --token mysecret \\
             --tls-cert /path/to/cert.pem \\
             --tls-key /path/to/key.pem
+
+        # Generate Noise keypair
+        burrow keygen --output server.key
+
+        # Start server with Noise encryption
+        burrow server --port 4000 --token mysecret \\
+            --encryption noise --noise-keyfile server.key
+
+        # Connect with Noise encryption
+        burrow client --server example.com:4000 --token mysecret \\
+            --encryption noise --noise-pubkey <base64_pubkey> \\
+            --tunnel web:8080:80
 
         # Connect with tunnels
         burrow client --server example.com:4000 --token mysecret \\

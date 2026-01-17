@@ -104,9 +104,9 @@ defmodule Burrow.Server.PublicHandler do
   end
 
   @impl GenServer
-  def handle_info(:close, {socket, _state}) do
+  def handle_info(:close, {socket, state}) do
     log_to_file("[PublicHandler] Received close message")
-    {:stop, :normal, {socket, _state}}
+    {:stop, :normal, {socket, state}}
   end
 
   @impl GenServer
