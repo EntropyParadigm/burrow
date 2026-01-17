@@ -107,7 +107,7 @@ defmodule Burrow.Server.NoiseHandler do
   end
 
   @impl ThousandIsland.Handler
-  def handle_close(_socket, state) do
+  def handle_close(_socket, state) when is_map(state) do
     if state[:client_id] do
       Burrow.Server.client_disconnected(state.client_id)
       Burrow.RateLimiter.clear_client(state.client_id)
@@ -119,9 +119,12 @@ defmodule Burrow.Server.NoiseHandler do
 
     :ok
   end
+
+  # Handle case where state is not a map (e.g., handshake failed)
+  def handle_close(_socket, _state), do: :ok
 
   @impl ThousandIsland.Handler
-  def handle_shutdown(_socket, state) do
+  def handle_shutdown(_socket, state) when is_map(state) do
     if state[:client_id] do
       Burrow.Server.client_disconnected(state.client_id)
       Burrow.RateLimiter.clear_client(state.client_id)
@@ -133,6 +136,9 @@ defmodule Burrow.Server.NoiseHandler do
 
     :ok
   end
+
+  # Handle case where state is not a map (e.g., handshake failed)
+  def handle_shutdown(_socket, _state), do: :ok
 
   # Handle messages from public listeners
   @impl GenServer
