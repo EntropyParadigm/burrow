@@ -109,7 +109,6 @@ defmodule Burrow.Client do
 
   @impl true
   def init(opts) do
-    File.write!("/tmp/burrow_client_debug.log", "[Client] Initializing...\n", [:append])
     host = Keyword.fetch!(opts, :host)
     port = Keyword.fetch!(opts, :port)
     token = Keyword.fetch!(opts, :token)
@@ -196,7 +195,7 @@ defmodule Burrow.Client do
         config.protocol
       )
 
-      send_data(state.transport, state.socket, frame)
+      send_encrypted_frame(state, frame)
 
       new_configs = [config | state.tunnel_configs]
       {:reply, :ok, %{state | tunnel_configs: new_configs, next_tunnel_id: state.next_tunnel_id + 1}}
@@ -211,7 +210,7 @@ defmodule Burrow.Client do
       {tunnel_id, _tunnel} ->
         # Send close for all connections on this tunnel
         frame = Protocol.encode_close(tunnel_id, 0)
-        if state.socket, do: send_data(state.transport, state.socket, frame)
+        if state.socket, do: send_encrypted_frame(state, frame)
 
         new_tunnels = Map.delete(state.tunnels, tunnel_id)
         new_configs = Enum.reject(state.tunnel_configs, &(&1.name == name))
@@ -255,7 +254,7 @@ defmodule Burrow.Client do
   def handle_info(:heartbeat, state) do
     if state.socket do
       frame = Protocol.encode_ping()
-      send_data(state.transport, state.socket, frame)
+      send_encrypted_frame(state, frame)
 
       # Schedule heartbeat timeout check
       timeout_ref = Process.send_after(self(), :heartbeat_timeout_check, state.heartbeat_timeout)
@@ -364,7 +363,7 @@ defmodule Burrow.Client do
         frame = Protocol.encode_data(tunnel_id, connection_id, data)
         if state.socket do
           log_to_file("[Client] Sending response frame to server")
-          send_data(state.transport, state.socket, frame)
+          send_encrypted_frame(state, frame)
         else
           log_to_file("[Client] ERROR: No server socket!")
         end
@@ -383,7 +382,7 @@ defmodule Burrow.Client do
       {tunnel_id, connection_id} ->
         log_to_file("[Client] Sending close for tunnel=#{tunnel_id}, conn=#{connection_id}")
         frame = Protocol.encode_close(tunnel_id, connection_id)
-        if state.socket, do: send_data(state.transport, state.socket, frame)
+        if state.socket, do: send_encrypted_frame(state, frame)
 
         new_connections = Map.delete(state.local_connections, {tunnel_id, connection_id})
         {:noreply, %{state | local_connections: new_connections}}
@@ -405,7 +404,7 @@ defmodule Burrow.Client do
         log_to_file("[Client] UDP response for tunnel=#{tunnel_id}, conn=#{connection_id}")
         frame = Protocol.encode_data(tunnel_id, connection_id, data)
         if state.socket do
-          send_data(state.transport, state.socket, frame)
+          send_encrypted_frame(state, frame)
         end
         {:noreply, state}
 
@@ -556,7 +555,7 @@ defmodule Burrow.Client do
     # Request all configured tunnels
     Enum.each(state.tunnel_configs, fn config ->
       frame = Protocol.encode_tunnel_req(config.id, config.name, config.remote, config.protocol)
-      send_data(state.transport, state.socket, frame)
+      send_encrypted_frame(state, frame)
     end)
 
     %{state | client_id: client_id}
@@ -633,7 +632,7 @@ defmodule Burrow.Client do
           {:error, reason} ->
             log_to_file("[Client] ERROR: Failed to connect locally: #{inspect(reason)}")
             frame = Protocol.encode_close(tid, cid)
-            send_data(state.transport, state.socket, frame)
+            send_encrypted_frame(state, frame)
             state
         end
 
@@ -662,7 +661,7 @@ defmodule Burrow.Client do
       {:error, reason} ->
         log_to_file("[Client] ERROR: Failed to send UDP: #{inspect(reason)}")
         frame = Protocol.encode_close(tid, cid)
-        send_data(state.transport, state.socket, frame)
+        send_encrypted_frame(state, frame)
         state
     end
   end
@@ -697,7 +696,7 @@ defmodule Burrow.Client do
 
   defp handle_frame(state, :ping, %{timestamp: ts}) do
     frame = Protocol.encode_pong(ts)
-    if state.socket, do: send_data(state.transport, state.socket, frame)
+    if state.socket, do: send_encrypted_frame(state, frame)
     state
   end
 
@@ -773,6 +772,30 @@ defmodule Burrow.Client do
 
   # Transport helper functions
 
+  # Send a protocol frame, encrypting with Noise if enabled
+  # This should be used for all data after connection is established
+  defp send_encrypted_frame(state, frame) do
+    case state do
+      %{encryption: :noise, noise_transport: transport, socket: socket}
+          when not is_nil(transport) and not is_nil(socket) ->
+        case Burrow.Noise.Transport.encrypt(transport, frame) do
+          {:ok, encrypted, _new_transport} ->
+            raw_socket = Burrow.Noise.Transport.socket(transport)
+            :gen_tcp.send(raw_socket, encrypted)
+
+          {:error, reason} ->
+            Logger.error("[Burrow.Client] Encryption failed: #{inspect(reason)}")
+            {:error, reason}
+        end
+
+      %{socket: socket, transport: transport} when not is_nil(socket) ->
+        send_data(transport, socket, frame)
+
+      _ ->
+        {:error, :not_connected}
+    end
+  end
+
   defp send_data(:ssl, socket, data), do: :ssl.send(socket, data)
   defp send_data(:gen_tcp, socket, data), do: :gen_tcp.send(socket, data)
   defp send_data(nil, socket, data), do: :gen_tcp.send(socket, data)
@@ -812,9 +835,9 @@ defmodule Burrow.Client do
     doubled + jitter
   end
 
-  # Write directly to file for debugging
+  # Debug logging helper
   defp log_to_file(msg) do
-    File.write!("/tmp/burrow_client_debug.log", "#{msg}\n", [:append])
+    Logger.debug(fn -> msg end)
   end
 
   # Noise encryption helpers
