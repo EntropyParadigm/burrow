@@ -39,9 +39,31 @@ Burrow.connect("server:4000",
 ```
 
 ### Noise Protocol Encryption
-**Status:** 📋 Planned
+**Status:** ✅ Completed
 
 Alternative encryption using Noise_IK pattern (like WireGuard) for lower overhead.
+
+```elixir
+# Generate keypair
+{:ok, keypair} = Burrow.Noise.generate_keypair()
+
+# Server with Noise
+Burrow.Server.start_link(
+  port: 4000,
+  token: "secret",
+  encryption: :noise,
+  noise_keypair: keypair
+)
+
+# Client with Noise
+Burrow.Client.start_link(
+  server: "server:4000",
+  token: "secret",
+  encryption: :noise,
+  noise_server_pubkey: pubkey,
+  tunnels: [[local: 8080, remote: 80]]
+)
+```
 
 ### Token Hashing (Argon2)
 **Status:** ✅ Completed
@@ -199,7 +221,7 @@ Automatic reconnection with exponential backoff on disconnect.
 ## Protocol Features
 
 ### UDP Tunneling
-**Status:** 📋 Planned
+**Status:** ✅ Completed
 
 Support for UDP protocol tunneling (DNS, gaming, VoIP, etc.).
 
@@ -384,7 +406,7 @@ access_log = "/var/log/burrow/access.log"
 ```
 
 ### Hot Reload
-**Status:** 📋 Planned
+**Status:** ✅ Completed
 
 Reload configuration without restarting.
 
@@ -410,8 +432,26 @@ BURROW_TLS_ENABLED=true \
 
 ## Operational Features
 
+### Tor Hidden Service Integration
+**Status:** ✅ Completed
+
+Seamless integration with Tor hidden services for anonymous access.
+
+```bash
+# Configure Tor on relay server (/etc/tor/torrc)
+HiddenServiceDir /var/lib/tor/myservice/
+HiddenServicePort 70 127.0.0.1:70
+HiddenServicePort 1965 127.0.0.1:1965
+
+# Get onion address
+sudo cat /var/lib/tor/myservice/hostname
+
+# Access via Tor
+torsocks nc <onion-address>.onion 70
+```
+
 ### Systemd Service
-**Status:** 📋 Planned
+**Status:** ✅ Completed
 
 Ready-made systemd unit file for Linux deployment.
 

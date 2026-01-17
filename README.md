@@ -597,6 +597,57 @@ Burrow.connect("relay.example.com:4000",
   --tunnel voice:9987:9987:udp
 ```
 
+## Tor Integration
+
+Burrow works seamlessly with Tor hidden services to provide anonymous access to your tunneled services.
+
+### Architecture
+
+```
+┌─────────────┐      Burrow       ┌─────────────┐      Tor       ┌─────────────┐
+│   Local     │◄═══════════════►│   Relay     │◄═════════════►│  Tor User   │
+│   Service   │   Noise Tunnel   │   Server    │  .onion:70    │  (Browser)  │
+│   :70       │                  │   :70       │               │             │
+└─────────────┘                  └─────────────┘               └─────────────┘
+```
+
+### Setup
+
+1. **Configure Tor on relay server** (`/etc/tor/torrc`):
+   ```
+   HiddenServiceDir /var/lib/tor/myservice/
+   HiddenServicePort 70 127.0.0.1:70
+   HiddenServicePort 1965 127.0.0.1:1965
+   ```
+
+2. **Restart Tor and get onion address**:
+   ```bash
+   sudo systemctl restart tor
+   sudo cat /var/lib/tor/myservice/hostname
+   # => abc123...xyz.onion
+   ```
+
+3. **Start Burrow server on relay**:
+   ```bash
+   ./burrow server --port 4000 --token secret \
+     --encryption noise --noise-keyfile server.key
+   ```
+
+4. **Connect from home**:
+   ```bash
+   ./burrow client --server relay.example.com:4000 --token secret \
+     --encryption noise --noise-pubkey <pubkey> \
+     --tunnel gopher:70:70 \
+     --tunnel gemini:1965:1965
+   ```
+
+5. **Access via Tor**:
+   ```bash
+   torsocks nc abc123...xyz.onion 70
+   ```
+
+Your services are now accessible anonymously via Tor while the tunnel is secured with Noise encryption.
+
 ## Development
 
 ```bash
@@ -627,6 +678,7 @@ mix docs
 - [x] Noise protocol encryption
 - [x] UDP tunneling
 - [x] Hot reload configuration
+- [x] Tor hidden service integration
 - [ ] Web dashboard
 - [ ] Public relay server (burrow.pub)
 - [ ] Prometheus metrics exporter
