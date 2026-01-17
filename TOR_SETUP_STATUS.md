@@ -44,7 +44,10 @@ All services are running and accessible via Tor hidden service.
 | Protocol | Clearnet | Tor |
 |----------|----------|-----|
 | Gopher | `gopher://gopherlab.org` | `gopher://4la36s6x44qfs5bktepwmbvrg2spz5etdons5a3cg2k7gfmwjkb7wqad.onion` |
+| Gopher (Tor-aware) | - | `gopher://4la36s6x44qfs5bktepwmbvrg2spz5etdons5a3cg2k7gfmwjkb7wqad.onion:7071` |
 | Gemini | `gemini://gopherlab.org` | `gemini://4la36s6x44qfs5bktepwmbvrg2spz5etdons5a3cg2k7gfmwjkb7wqad.onion` |
+
+**Port 7071**: Tor-specific port that displays "Network: Tor Hidden Service" instead of "Clearnet"
 
 ## Key Information
 
